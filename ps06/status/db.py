@@ -71,9 +71,34 @@ def _migration_0001_initial(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migration_0002_document_extraction(conn: sqlite3.Connection) -> None:
+    """Create the ``document_extraction`` table (M-2: per-document OCR output).
+
+    One row per (case, document), holding the job's raw extraction result as a
+    JSON blob (see ``ps06.ocr.envelope.OcrResult``). A retried document's row is
+    overwritten, not accumulated — the table reflects the latest attempt only,
+    consistent with ``document_status.attempt_count`` tracking retries rather
+    than history.
+    """
+
+    conn.execute(
+        """
+        CREATE TABLE document_extraction (
+            case_id            TEXT    NOT NULL,
+            document_id        TEXT    NOT NULL,
+            extracted_at       TEXT    NOT NULL,   -- ISO-8601 UTC
+            processing_seconds REAL    NOT NULL,
+            payload            TEXT    NOT NULL,   -- OcrResult, JSON-serialized
+            PRIMARY KEY (case_id, document_id)
+        );
+        """
+    )
+
+
 #: Ordered migration ledger. Append-only.
 MIGRATIONS: list[tuple[int, Callable[[sqlite3.Connection], None]]] = [
     (1, _migration_0001_initial),
+    (2, _migration_0002_document_extraction),
 ]
 
 #: Latest schema version defined in this module.
