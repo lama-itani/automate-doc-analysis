@@ -74,7 +74,7 @@ class TestStates:
 class TestDbMigrations:
     def test_connect_migrates_to_latest(self):
         conn = db.connect()
-        assert db._current_version(conn) == db.SCHEMA_VERSION == 1
+        assert db._current_version(conn) == db.SCHEMA_VERSION == 2
 
     def test_schema_shape(self):
         conn = db.connect()
@@ -95,12 +95,26 @@ class TestDbMigrations:
         indexes = {r["name"] for r in conn.execute("PRAGMA index_list('document_status')")}
         assert "idx_document_status_case_id" in indexes
 
+    def test_document_extraction_schema_shape(self):
+        conn = db.connect()
+        cols = {r["name"]: r for r in conn.execute("PRAGMA table_info(document_extraction)")}
+        assert set(cols) == {
+            "case_id",
+            "document_id",
+            "extracted_at",
+            "processing_seconds",
+            "payload",
+        }
+        assert cols["case_id"]["pk"] == 1
+        assert cols["document_id"]["pk"] == 2
+        assert cols["payload"]["notnull"] == 1
+
     def test_migrate_is_idempotent(self):
         conn = db.connect()
         db.migrate(conn)
         db.migrate(conn)
         count = conn.execute("SELECT COUNT(*) FROM schema_version").fetchone()[0]
-        assert count == 1
+        assert count == 2
 
     def test_file_backed_persists(self, tmp_path):
         path = tmp_path / "nested" / "status.db"
@@ -110,7 +124,7 @@ class TestDbMigrations:
         assert path.exists()
         # reconnect: migration is a no-op and data survives
         conn2 = db.connect(path)
-        assert db._current_version(conn2) == 1
+        assert db._current_version(conn2) == 2
         assert StatusStore(conn2).get("C", "d") is not None
 
 

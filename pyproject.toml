@@ -5,6 +5,9 @@ description = "PS-06 Automation of Immigration Case Files — per-invocation tok
 requires-python = ">=3.10"
 dependencies = [
     "pydantic>=2.0",
+    "PyMuPDF>=1.24",
+    "Pillow>=10.0",
+    "openai>=1.0",
 ]
 
 [project.optional-dependencies]
