@@ -85,6 +85,14 @@ class StatusStore:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self._conn = conn
 
+    @property
+    def connection(self) -> sqlite3.Connection:
+        """The underlying connection, for callers writing to other tables in
+        the same migrated database (e.g. M-2's ``document_extraction``) that
+        need to share this store's transaction/connection lifecycle rather
+        than opening a second one."""
+        return self._conn
+
     # -- writes --------------------------------------------------------------
 
     def register_document(
