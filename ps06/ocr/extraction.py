@@ -110,6 +110,7 @@ class OcrJobConfig(BaseModel):
     temperature: float = 0.0
     use_text_layer_fast_path: bool = True
     min_text_layer_chars: int = 60
+    enable_orientation_correction: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -416,12 +417,14 @@ def _process_image_bytes(
     else:
         b64_target = b64_input
 
-    orientation = _detect_orientation(client, config, b64_target)
+    orientation = "NONE"
+    if config.enable_orientation_correction:
+        orientation = _detect_orientation(client, config, b64_target)
 
-    if orientation != "NONE":
-        corrected = _correct_orientation(_pil_from_b64(b64_target), orientation)
-        b64_target = _encode_pil_image(corrected)
-        logger.debug("orientation corrected label=%s", orientation)
+        if orientation != "NONE":
+            corrected = _correct_orientation(_pil_from_b64(b64_target), orientation)
+            b64_target = _encode_pil_image(corrected)
+            logger.debug("orientation corrected label=%s", orientation)
 
     ocr_text = _call_vlm(
         client,
