@@ -63,6 +63,7 @@ def _build_config(args: argparse.Namespace) -> OcrJobConfig:
         temperature=args.temperature,
         use_text_layer_fast_path=args.use_text_layer_fast_path,
         min_text_layer_chars=args.min_text_layer_chars,
+        enable_orientation_correction=args.enable_orientation_correction,
     )
 
 
@@ -131,6 +132,13 @@ def _build_parser() -> argparse.ArgumentParser:
         help="disable the PDF text-layer fast path (always use the VLM)",
     )
     p_run.add_argument("--min-text-layer-chars", type=int, default=60)
+    p_run.add_argument(
+        "--enable-orientation-correction",
+        action="store_true",
+        default=False,
+        help="detect and correct page rotation via the VLM before OCR "
+        "(off by default: unreliable on sparse/portrait content, see Tier-1 findings)",
+    )
     p_run.add_argument(
         "--auth", choices=["cdsw", "fake"], default="cdsw",
         help="token provider: 'cdsw' (real, not yet implemented) or 'fake' "

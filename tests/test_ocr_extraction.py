@@ -66,7 +66,9 @@ def test_fast_path_disabled_forces_vlm_even_with_text_layer(pdf_with_text_layer,
 def test_vlm_path_with_orientation_correction(pdf_without_text_layer):
     client = FakeVlmClient(orientation_label="ROTATE_180", ocr_text="rotated text")
 
-    result = extract(str(pdf_without_text_layer), _config(), client)
+    result = extract(
+        str(pdf_without_text_layer), _config(enable_orientation_correction=True), client
+    )
 
     assert result.pages_via_vlm == 1
     assert result.orientation_corrections == {1: "ROTATE_180"}
@@ -89,7 +91,9 @@ def test_vlm_path_with_orientation_correction(pdf_without_text_layer):
 def test_orientation_none_not_recorded(pdf_without_text_layer):
     client = FakeVlmClient(orientation_label="NONE", ocr_text="upright text")
 
-    result = extract(str(pdf_without_text_layer), _config(), client)
+    result = extract(
+        str(pdf_without_text_layer), _config(enable_orientation_correction=True), client
+    )
 
     assert result.orientation_corrections == {}
     assert "[orientation corrected" not in result.extracted_text
@@ -106,7 +110,9 @@ def test_orientation_none_not_recorded(pdf_without_text_layer):
 def test_each_orientation_label_applies_expected_transform(pdf_without_text_layer, label, transform):
     client = FakeVlmClient(orientation_label=label, ocr_text="text")
 
-    result = extract(str(pdf_without_text_layer), _config(), client)
+    result = extract(
+        str(pdf_without_text_layer), _config(enable_orientation_correction=True), client
+    )
 
     assert result.orientation_corrections == {1: label}
 
@@ -123,7 +129,9 @@ def test_each_orientation_label_applies_expected_transform(pdf_without_text_laye
 def test_fuzzy_orientation_response_resolves(pdf_without_text_layer):
     client = FakeVlmClient(orientation_label="the answer is ROTATE_180.", ocr_text="text")
 
-    result = extract(str(pdf_without_text_layer), _config(), client)
+    result = extract(
+        str(pdf_without_text_layer), _config(enable_orientation_correction=True), client
+    )
 
     assert result.orientation_corrections == {1: "ROTATE_180"}
 
@@ -131,9 +139,23 @@ def test_fuzzy_orientation_response_resolves(pdf_without_text_layer):
 def test_unrecognized_orientation_response_defaults_to_none(pdf_without_text_layer):
     client = FakeVlmClient(orientation_label="gibberish", ocr_text="text")
 
+    result = extract(
+        str(pdf_without_text_layer), _config(enable_orientation_correction=True), client
+    )
+
+    assert result.orientation_corrections == {}
+
+
+def test_orientation_correction_disabled_by_default(pdf_without_text_layer):
+    """Off by default per Tier-1 findings: the model unreliably judges orientation
+    on sparse/portrait content, so skipping detection avoids the failure class
+    entirely rather than risk a silent misfire."""
+    client = FakeVlmClient(orientation_label="ROTATE_180", ocr_text="text")
+
     result = extract(str(pdf_without_text_layer), _config(), client)
 
     assert result.orientation_corrections == {}
+    assert client.orientation_calls == []
 
 
 def test_upright_dense_text_page_not_corrected(tmp_path):
@@ -149,7 +171,11 @@ def test_upright_dense_text_page_not_corrected(tmp_path):
     doc.close()
 
     client = FakeVlmClient(orientation_label="NONE", ocr_text="dense upright text")
-    result = extract(str(path), _config(use_text_layer_fast_path=False), client)
+    result = extract(
+        str(path),
+        _config(use_text_layer_fast_path=False, enable_orientation_correction=True),
+        client,
+    )
 
     assert result.orientation_corrections == {}
     assert "[orientation corrected" not in result.extracted_text
@@ -168,7 +194,11 @@ def test_upright_sparse_mrz_like_page_not_corrected(tmp_path):
     doc.close()
 
     client = FakeVlmClient(orientation_label="NONE", ocr_text="mrz upright text")
-    result = extract(str(path), _config(use_text_layer_fast_path=False), client)
+    result = extract(
+        str(path),
+        _config(use_text_layer_fast_path=False, enable_orientation_correction=True),
+        client,
+    )
 
     assert result.orientation_corrections == {}
     assert "[orientation corrected" not in result.extracted_text
