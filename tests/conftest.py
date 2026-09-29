@@ -124,3 +124,119 @@ class FakeVlmClient:
 @pytest.fixture
 def fake_vlm_client():
     return FakeVlmClient()
+
+
+class FakeClassificationClient:
+    """Test double for ReauthHTTPClient.chat_completion, for classification.
+
+    Classification calls are text-only (no image_url block), unlike
+    FakeVlmClient's OCR/orientation calls — distinguished structurally here
+    rather than by prompt text, since the classification prompt interpolates
+    the full extracted text and isn't a stable string to match on.
+    """
+
+    def __init__(self, response: str = "OTHER") -> None:
+        self.response = response
+        self.calls: list[dict] = []
+
+    def chat_completion(self, *, messages, max_tokens, temperature=0.0, extra_body=None):
+        prompt = messages[0]["content"][0]["text"]
+        call = {
+            "prompt": prompt,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "extra_body": extra_body,
+        }
+        self.calls.append(call)
+        return self.response
+
+
+@pytest.fixture
+def fake_classification_client():
+    return FakeClassificationClient()
+
+
+class _FakeMsg:
+    def __init__(self, content: str) -> None:
+        self.content = content
+
+
+class _FakeChoice:
+    def __init__(self, content: str) -> None:
+        self.message = _FakeMsg(content)
+
+
+class _FakeCompletion:
+    def __init__(self, content: str) -> None:
+        self.choices = [_FakeChoice(content)]
+
+
+class _FakeCompletions:
+    """Returns ``ocr_text`` for an OCR/orientation-style call (image block
+    present) and ``classification_text`` for a classification call (text-only)
+    — distinguished structurally, same convention as FakeClassificationClient.
+    """
+
+    def __init__(
+        self,
+        ocr_text: str,
+        classification_text: str,
+        fail_on_call: int | None,
+    ) -> None:
+        self._ocr_text = ocr_text
+        self._classification_text = classification_text
+        self._fail_on_call = fail_on_call
+        self.call_count = 0
+
+    def create(self, **kwargs):
+        self.call_count += 1
+        if self._fail_on_call == self.call_count:
+            raise RuntimeError(f"simulated failure on call {self.call_count}")
+        messages = kwargs["messages"]
+        has_image = len(messages[0]["content"]) > 1
+        content = self._ocr_text if has_image else self._classification_text
+        return _FakeCompletion(content)
+
+
+class _FakeChat:
+    def __init__(self, completions: _FakeCompletions) -> None:
+        self.completions = completions
+
+
+class FakeOpenAIClient:
+    """Test double standing in for ``openai.OpenAI`` at the ``client_factory``
+    seam (:class:`~ps06.ocr.http_client.ReauthHTTPClient`,
+    :func:`ps06.ocr.job.run`, :class:`~ps06.orchestrator.launcher.LocalThreadJobLauncher`).
+
+    Needed because classification (M-2.5) unconditionally calls the LLM once
+    extracted text is above the EMPTY threshold — CLI/orchestrator tests that
+    previously relied on the text-layer fast path making zero LLM calls (and
+    so could safely construct a *real* ``openai.OpenAI`` against a fake URL)
+    now need a fake client at this seam too, or the classification call
+    attempts a real network request.
+    """
+
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        api_key: str,
+        ocr_text: str = "unused",
+        classification_text: str = "OTHER",
+        fail_on_call: int | None = None,
+    ) -> None:
+        self.base_url = base_url
+        self.api_key = api_key
+        self.chat = _FakeChat(_FakeCompletions(ocr_text, classification_text, fail_on_call))
+
+
+@pytest.fixture
+def fake_openai_client_factory():
+    """A zero-arg factory producing a fresh :class:`FakeOpenAIClient`, ready to
+    pass as ``client_factory=`` to ``job.run``/``LocalThreadJobLauncher``/the
+    CLIs' ``client_factory`` param."""
+
+    def factory(*, base_url: str, api_key: str) -> FakeOpenAIClient:
+        return FakeOpenAIClient(base_url=base_url, api_key=api_key)
+
+    return factory

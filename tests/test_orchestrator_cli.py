@@ -31,7 +31,9 @@ def _endpoint_args() -> list[str]:
 
 
 class TestRunCase:
-    def test_run_case_drives_all_to_ocr_done(self, tmp_path, pdf_with_text_layer):
+    def test_run_case_drives_all_to_ocr_done(
+        self, tmp_path, pdf_with_text_layer, fake_openai_client_factory
+    ):
         db_path = tmp_path / "ps06.db"
         pdf = str(pdf_with_text_layer)
         rc = main(
@@ -40,7 +42,8 @@ class TestRunCase:
                 "--doc", f"d1={pdf}", "--doc", f"d2={pdf}",
                 "--auto-register", "--max-concurrency", "2",
                 *_endpoint_args(),
-            ]
+            ],
+            client_factory=fake_openai_client_factory,
         )
         assert rc == 0
         store = StatusStore(db.connect(db_path))
@@ -84,14 +87,17 @@ class TestRunCase:
 
 
 class TestStatus:
-    def test_status_reports_case(self, tmp_path, pdf_with_text_layer, capsys):
+    def test_status_reports_case(
+        self, tmp_path, pdf_with_text_layer, capsys, fake_openai_client_factory
+    ):
         db_path = tmp_path / "ps06.db"
         pdf = str(pdf_with_text_layer)
         main(
             [
                 "--db", str(db_path), "run-case", "--case", "C1",
                 "--doc", f"d1={pdf}", "--auto-register", *_endpoint_args(),
-            ]
+            ],
+            client_factory=fake_openai_client_factory,
         )
         capsys.readouterr()  # drop run-case output
         rc = main(["--db", str(db_path), "status", "--case", "C1"])
@@ -108,7 +114,9 @@ class TestStatus:
 
 
 class TestRetryFailed:
-    def test_retry_failed_re_drives_with_corrected_path(self, tmp_path, pdf_with_text_layer):
+    def test_retry_failed_re_drives_with_corrected_path(
+        self, tmp_path, pdf_with_text_layer, fake_openai_client_factory
+    ):
         db_path = tmp_path / "ps06.db"
         bad = tmp_path / "notes.txt"
         bad.write_text("unsupported")
@@ -120,7 +128,8 @@ class TestRetryFailed:
                 "--db", str(db_path), "run-case", "--case", "C1",
                 "--doc", f"d1={bad}", "--auto-register", "--max-attempts", "1",
                 *_endpoint_args(),
-            ]
+            ],
+            client_factory=fake_openai_client_factory,
         )
         assert rc == 1
         store = StatusStore(db.connect(db_path))
@@ -132,7 +141,8 @@ class TestRetryFailed:
                 "--db", str(db_path), "retry-failed", "--case", "C1",
                 "--doc", f"d1={good}", "--max-attempts", "3",
                 *_endpoint_args(),
-            ]
+            ],
+            client_factory=fake_openai_client_factory,
         )
         assert rc == 0
         store = StatusStore(db.connect(db_path))
@@ -140,14 +150,17 @@ class TestRetryFailed:
         assert final.stage is DocumentStage.OCR_DONE
         assert final.attempt_count == 2  # one retry as a fresh invocation
 
-    def test_retry_failed_noop_when_none_failed(self, tmp_path, pdf_with_text_layer, capsys):
+    def test_retry_failed_noop_when_none_failed(
+        self, tmp_path, pdf_with_text_layer, capsys, fake_openai_client_factory
+    ):
         db_path = tmp_path / "ps06.db"
         pdf = str(pdf_with_text_layer)
         main(
             [
                 "--db", str(db_path), "run-case", "--case", "C1",
                 "--doc", f"d1={pdf}", "--auto-register", *_endpoint_args(),
-            ]
+            ],
+            client_factory=fake_openai_client_factory,
         )
         capsys.readouterr()
         rc = main(

@@ -30,6 +30,9 @@ from __future__ import annotations
 import argparse
 import sys
 from collections.abc import Callable, Sequence
+from typing import Any
+
+import openai
 
 from ps06.ocr.auth import AuthProvider, CDSWAuthProvider, FakeAuthProvider
 from ps06.ocr.extraction import DEFAULT_PDF_DPI, OcrJobConfig
@@ -102,13 +105,19 @@ def _print_summary(summary: CaseSummary) -> None:
         print(f"  {o.document_id}: {o.stage.value}  attempt={o.attempt_count}{err}")
 
 
-def _drive(store: StatusStore, args: argparse.Namespace, documents: dict[str, str]) -> int:
+def _drive(
+    store: StatusStore,
+    args: argparse.Namespace,
+    documents: dict[str, str],
+    client_factory: Callable[..., Any],
+) -> int:
     """Run one orchestrator pass over ``documents`` and report. Returns a nonzero
     exit code if any document ended ``FAILED`` (surface failures, never silent)."""
     launcher = LocalThreadJobLauncher(
         args.db,
         _build_ocr_config(args),
         _build_auth_factory(args),
+        client_factory=client_factory,
         max_workers=args.max_concurrency,
     )
     with launcher:
@@ -121,7 +130,11 @@ def _drive(store: StatusStore, args: argparse.Namespace, documents: dict[str, st
     return 0 if summary.failed == 0 else 1
 
 
-def _cmd_run_case(store: StatusStore, args: argparse.Namespace) -> int:
+def _cmd_run_case(
+    store: StatusStore,
+    args: argparse.Namespace,
+    client_factory: Callable[..., Any],
+) -> int:
     documents = _parse_documents(args.doc)
     if args.auto_register:
         for doc_id in documents:
@@ -129,10 +142,14 @@ def _cmd_run_case(store: StatusStore, args: argparse.Namespace) -> int:
                 store.register_document(args.case, doc_id)
             except DocumentAlreadyExists:
                 pass
-    return _drive(store, args, documents)
+    return _drive(store, args, documents, client_factory)
 
 
-def _cmd_retry_failed(store: StatusStore, args: argparse.Namespace) -> int:
+def _cmd_retry_failed(
+    store: StatusStore,
+    args: argparse.Namespace,
+    client_factory: Callable[..., Any],
+) -> int:
     documents = _parse_documents(args.doc)
     failed = {
         doc_id: path
@@ -144,10 +161,14 @@ def _cmd_retry_failed(store: StatusStore, args: argparse.Namespace) -> int:
         print(f"case {args.case!r}: no FAILED documents among the supplied set")
         return 0
     # Raise --max-attempts above the stored attempt_count to re-enable retries.
-    return _drive(store, args, failed)
+    return _drive(store, args, failed, client_factory)
 
 
-def _cmd_status(store: StatusStore, args: argparse.Namespace) -> int:
+def _cmd_status(
+    store: StatusStore,
+    args: argparse.Namespace,
+    client_factory: Callable[..., Any],
+) -> int:
     docs = store.list_for_case(args.case)
     if not docs:
         print(f"case {args.case!r}: no documents")
@@ -245,12 +266,16 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def main(
+    argv: Sequence[str] | None = None,
+    *,
+    client_factory: Callable[..., Any] = openai.OpenAI,
+) -> int:
     args = _build_parser().parse_args(argv)
     conn = db.connect(args.db)
     try:
         store = StatusStore(conn)
-        return args.func(store, args)
+        return args.func(store, args, client_factory)
     except StatusStoreError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

@@ -35,6 +35,8 @@ import pymupdf
 from PIL import Image
 from pydantic import BaseModel, ConfigDict, Field
 
+from ps06.classification.classifier import ClassificationConfig
+
 logger = logging.getLogger(__name__)
 
 
@@ -98,6 +100,12 @@ class OcrJobConfig(BaseModel):
     part of "the OCR job's configuration" (mirrors the port source's
     ``UserParameters``, which also mixes client-construction fields with
     per-call fields).
+
+    ``classification`` (M-2.5) configures the document-classification step
+    ``job.py`` runs after extraction, reusing the same client this config's
+    ``endpoint_url``/``model_name`` build — nested here rather than as a
+    separate top-level job parameter to keep "the OCR job's configuration"
+    as one object passed around by callers (CLI, orchestrator).
     """
 
     model_config = ConfigDict(frozen=True)
@@ -111,6 +119,7 @@ class OcrJobConfig(BaseModel):
     use_text_layer_fast_path: bool = True
     min_text_layer_chars: int = 60
     enable_orientation_correction: bool = False
+    classification: ClassificationConfig = Field(default_factory=ClassificationConfig)
 
 
 # ---------------------------------------------------------------------------
