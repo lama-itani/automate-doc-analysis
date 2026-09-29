@@ -41,6 +41,19 @@ class InvalidTransition(StatusStoreError):
     """Raised when a stage change violates the state machine."""
 
 
+class TransitionConflict(StatusStoreError):
+    """Raised when a document's stage changed concurrently mid-transition.
+
+    :meth:`StatusStore.transition` validates against the stage it read, then
+    applies a compare-and-swap ``UPDATE`` guarded on that same stage. If another
+    writer moved the row in between, the guarded update matches zero rows and
+    this is raised instead of silently clobbering the other writer's change
+    (HARDENING_NOTES #2). Under the orchestrator's one-owner-per-document
+    invariant this should not occur in normal operation; when it does it is a
+    real, visible conflict — never a silent lost update.
+    """
+
+
 # --- Row model --------------------------------------------------------------
 
 
@@ -142,6 +155,16 @@ class StatusStore:
           * ``error_detail`` is stored when ``target`` is
             :attr:`DocumentStage.FAILED` and cleared otherwise.
           * ``last_updated`` is always stamped.
+
+        Concurrency: the ``UPDATE`` is a compare-and-swap guarded on the stage
+        this call validated against (``WHERE ... AND stage = <current>``). If a
+        concurrent writer moved the row between the read and the write, the
+        guarded update matches zero rows and :class:`TransitionConflict` is
+        raised rather than overwriting the other writer's change — closing the
+        read-modify-write race (HARDENING_NOTES #2). (An explicit
+        ``BEGIN IMMEDIATE`` around read+write is the alternative fix; the
+        compare-and-swap achieves the same guarantee without depending on the
+        connection's isolation-level configuration.)
         """
         current = self.get_or_raise(case_id, document_id)
         if not is_valid_transition(current.stage, target):
@@ -158,15 +181,29 @@ class StatusStore:
         now = _utcnow_iso()
 
         with self._conn:
-            self._conn.execute(
+            cursor = self._conn.execute(
                 """
                 UPDATE document_status
                    SET stage = ?, attempt_count = ?, last_updated = ?,
                        error_detail = ?
-                 WHERE case_id = ? AND document_id = ?;
+                 WHERE case_id = ? AND document_id = ? AND stage = ?;
                 """,
-                (target.value, new_attempt, now, new_error, case_id, document_id),
+                (
+                    target.value,
+                    new_attempt,
+                    now,
+                    new_error,
+                    case_id,
+                    document_id,
+                    current.stage.value,  # compare-and-swap guard
+                ),
             )
+            if cursor.rowcount != 1:
+                raise TransitionConflict(
+                    f"stage changed concurrently mid-transition (expected "
+                    f"{current.stage.value}) for case={case_id!r} "
+                    f"document={document_id!r}"
+                )
         return self.get_or_raise(case_id, document_id)
 
     # -- reads ---------------------------------------------------------------

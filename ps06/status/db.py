@@ -17,14 +17,27 @@ from typing import Callable
 #: In-memory database sentinel accepted by :func:`connect` (useful for tests).
 MEMORY = ":memory:"
 
+#: Explicit lock-wait budget (ms). Under the M-3 orchestrator, many per-document
+#: invocations write to one file concurrently; a blocked writer waits up to this
+#: long for the lock instead of failing immediately with ``database is locked``.
+#: Set explicitly rather than relying on ``sqlite3.connect``'s implicit
+#: ``timeout=5.0``, so the value is visible and independent of the driver default.
+BUSY_TIMEOUT_MS = 5000
+
 
 def connect(db_path: str | Path = MEMORY) -> sqlite3.Connection:
     """Open (creating if needed) the status database and run migrations.
 
     Returns a connection with:
       * ``row_factory`` = :class:`sqlite3.Row` for name-based column access,
-      * foreign keys enabled, and
+      * foreign keys enabled,
+      * **WAL** journal mode + an explicit ``busy_timeout`` so concurrent
+        per-document writers (M-3 orchestrator) don't block/fail each other, and
       * the schema migrated up to the latest version.
+
+    WAL is a persistent, file-level setting: it takes effect for file-backed
+    databases and is a harmless no-op for :data:`MEMORY` (which reports
+    ``journal_mode = memory``). See ``ps06/status/HARDENING_NOTES.md`` item #1.
 
     Passing :data:`MEMORY` (the default) yields an ephemeral database — each call
     is a distinct in-memory DB, which suits unit tests.
@@ -37,6 +50,8 @@ def connect(db_path: str | Path = MEMORY) -> sqlite3.Connection:
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON;")
+    conn.execute("PRAGMA journal_mode = WAL;")
+    conn.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS};")
     migrate(conn)
     return conn
 
