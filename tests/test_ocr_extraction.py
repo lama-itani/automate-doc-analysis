@@ -382,3 +382,17 @@ def test_ocr_job_config_defaults_and_frozen():
 
     with pytest.raises(Exception):
         config.model_name = "changed"
+
+
+def test_ocr_job_config_classification_defaults_and_override():
+    from ps06.classification.classifier import ClassificationConfig
+
+    config = _config()
+    assert config.classification.max_tokens == 32
+    assert config.classification.min_chars_for_classification == 10
+
+    overridden = _config(
+        classification=ClassificationConfig(max_tokens=64, max_text_chars=1000)
+    )
+    assert overridden.classification.max_tokens == 64
+    assert overridden.classification.max_text_chars == 1000

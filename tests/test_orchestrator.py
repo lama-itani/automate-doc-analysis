@@ -208,7 +208,9 @@ class TestCrashReconciliation:
 
 
 class TestIntegrationLocalThreadLauncher:
-    def test_end_to_end_real_threads_reach_ocr_done(self, tmp_path, pdf_with_text_layer):
+    def test_end_to_end_real_threads_reach_ocr_done(
+        self, tmp_path, pdf_with_text_layer, fake_openai_client_factory
+    ):
         # Real seams composed: orchestrator + LocalThreadJobLauncher (real threads,
         # real job.run, real status writes on a WAL file DB). Fast-path fixture ->
         # no VLM/network call. The orchestrator reads on its own connection while
@@ -221,7 +223,11 @@ class TestIntegrationLocalThreadLauncher:
 
         cfg = OcrJobConfig(endpoint_url="http://localhost/v1", model_name="test-model")
         with LocalThreadJobLauncher(
-            db_path, cfg, auth_factory=lambda: FakeAuthProvider(["tok"]), max_workers=2
+            db_path,
+            cfg,
+            auth_factory=lambda: FakeAuthProvider(["tok"]),
+            client_factory=fake_openai_client_factory,
+            max_workers=2,
         ) as launcher:
             summary = process_case(
                 "C1",

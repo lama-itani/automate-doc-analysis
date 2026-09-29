@@ -25,7 +25,9 @@ from ps06.status.store import StatusStore
 
 def _config() -> OcrJobConfig:
     # Fast-path defaults (use_text_layer_fast_path=True) mean a text-layer PDF
-    # never calls the endpoint, so endpoint_url/model_name are inert here.
+    # never calls the endpoint for extraction, but classification (M-2.5)
+    # always calls it once text is above the EMPTY threshold — endpoint_url is
+    # not actually inert, callers must supply a client_factory (see below).
     return OcrJobConfig(endpoint_url="http://localhost/v1", model_name="test-model")
 
 
@@ -38,14 +40,19 @@ def _wait_done(handle, timeout: float = 5.0) -> None:
 
 
 class TestLocalThreadJobLauncher:
-    def test_runs_job_to_ocr_done(self, tmp_path, pdf_with_text_layer):
+    def test_runs_job_to_ocr_done(
+        self, tmp_path, pdf_with_text_layer, fake_openai_client_factory
+    ):
         db_path = tmp_path / "ps06.db"
         conn = db.connect(db_path)
         StatusStore(conn).register_document("C1", "d1")
         conn.close()
 
         with LocalThreadJobLauncher(
-            db_path, _config(), auth_factory=lambda: FakeAuthProvider(["tok"])
+            db_path,
+            _config(),
+            auth_factory=lambda: FakeAuthProvider(["tok"]),
+            client_factory=fake_openai_client_factory,
         ) as launcher:
             handle = launcher.launch("C1", "d1", str(pdf_with_text_layer))
             _wait_done(handle)

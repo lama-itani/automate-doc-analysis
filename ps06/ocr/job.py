@@ -1,12 +1,13 @@
-"""Per-document OCR job orchestrator (M-2, step 7).
+"""Per-document OCR job orchestrator (M-2, step 7; classification added M-2.5).
 
 Ties together the pieces built in steps 1-6: mints a fresh token and builds a
 :class:`~ps06.ocr.http_client.ReauthHTTPClient` (per-invocation token
 isolation — the whole reason this build exists), runs
-:func:`ps06.ocr.extraction.extract`, wraps the result in an
-:class:`~ps06.ocr.envelope.OcrResult`, persists it to the
-``document_extraction`` table, and drives the document's status via
-:class:`~ps06.status.store.StatusStore`.
+:func:`ps06.ocr.extraction.extract` followed by
+:func:`ps06.classification.classifier.classify` (reusing the same client — no
+second token mint), wraps both results in an :class:`~ps06.ocr.envelope.OcrResult`,
+persists it to the ``document_extraction`` table, and drives the document's
+status via :class:`~ps06.status.store.StatusStore`.
 
 Every failure path — extraction error, auth exhaustion, a bug, a persistence
 failure — is caught by one ``except Exception``, always transitions the
@@ -14,6 +15,9 @@ document to :attr:`~ps06.status.states.DocumentStage.FAILED` with a populated
 ``error_detail``, and always re-raises so the process exits non-zero and the
 failure stays visible. No silent failures, per the production-readiness bar
 for this build (see the Build Handoff's "M-2 session 2" Progress Log entry).
+``classify`` itself never raises for an ambiguous/unparseable model response
+(see its docstring) — only genuine infrastructure failures reach this
+``except Exception``, same as an extraction failure.
 """
 
 from __future__ import annotations
@@ -25,6 +29,7 @@ from typing import Any
 
 import openai
 
+from ps06.classification.classifier import classify
 from ps06.ocr.auth import AuthProvider
 from ps06.ocr.envelope import OcrResult
 from ps06.ocr.extraction import OcrJobConfig, extract
@@ -66,12 +71,14 @@ def run(
             auth, config.endpoint_url, config.model_name, client_factory=client_factory
         )
         extraction = extract(file_path, config, client)
+        classification = classify(extraction.extracted_text, config.classification, client)
         processing_seconds = time.monotonic() - start
         result = OcrResult.build(
             case_id=case_id,
             document_id=document_id,
             file_path=file_path,
             extraction=extraction,
+            classification=classification,
             processing_seconds=processing_seconds,
             model_name=config.model_name,
         )

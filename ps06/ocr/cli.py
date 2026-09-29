@@ -22,8 +22,12 @@ from __future__ import annotations
 
 import argparse
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from typing import Any
 
+import openai
+
+from ps06.classification.classifier import ClassificationConfig
 from ps06.ocr.auth import AuthProvider, CDSWAuthProvider, FakeAuthProvider
 from ps06.ocr.envelope import OcrResult
 from ps06.ocr.extraction import DEFAULT_PDF_DPI, ExtractionError, OcrJobConfig
@@ -44,6 +48,11 @@ def _print_result(result: OcrResult) -> None:
         f"processing_seconds={result.processing_seconds:.3f} "
         f"model_name={result.model_name}"
     )
+    if result.classification is not None:
+        print(
+            f"  document_type={result.classification.document_type.value} "
+            f"generation={result.classification.generation}"
+        )
 
 
 def _build_auth(args: argparse.Namespace) -> AuthProvider:
@@ -52,6 +61,18 @@ def _build_auth(args: argparse.Namespace) -> AuthProvider:
             raise SystemExit("error: --auth fake requires at least one --fake-token")
         return FakeAuthProvider(tokens=args.fake_token)
     return CDSWAuthProvider()
+
+
+def _build_classification_config(args: argparse.Namespace) -> ClassificationConfig:
+    # prompt_template is intentionally not exposed as a CLI flag — it's a
+    # multi-line Spanish-aware prompt, impractical as a single-line arg.
+    # Stays code-default-only.
+    return ClassificationConfig(
+        max_tokens=args.classification_max_tokens,
+        temperature=args.classification_temperature,
+        max_text_chars=args.classification_max_text_chars,
+        min_chars_for_classification=args.classification_min_chars,
+    )
 
 
 def _build_config(args: argparse.Namespace) -> OcrJobConfig:
@@ -64,10 +85,15 @@ def _build_config(args: argparse.Namespace) -> OcrJobConfig:
         use_text_layer_fast_path=args.use_text_layer_fast_path,
         min_text_layer_chars=args.min_text_layer_chars,
         enable_orientation_correction=args.enable_orientation_correction,
+        classification=_build_classification_config(args),
     )
 
 
-def _cmd_run(store: StatusStore, args: argparse.Namespace) -> int:
+def _cmd_run(
+    store: StatusStore,
+    args: argparse.Namespace,
+    client_factory: Callable[..., Any],
+) -> int:
     if args.auto_register:
         try:
             store.register_document(args.case, args.doc)
@@ -76,7 +102,9 @@ def _cmd_run(store: StatusStore, args: argparse.Namespace) -> int:
 
     auth = _build_auth(args)
     config = _build_config(args)
-    result = run_job(args.case, args.doc, args.file, config, store, auth)
+    result = run_job(
+        args.case, args.doc, args.file, config, store, auth, client_factory=client_factory
+    )
 
     _print_result(result)
     if args.json:
@@ -84,7 +112,11 @@ def _cmd_run(store: StatusStore, args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_show(store: StatusStore, args: argparse.Namespace) -> int:
+def _cmd_show(
+    store: StatusStore,
+    args: argparse.Namespace,
+    client_factory: Callable[..., Any],
+) -> int:
     row = store.connection.execute(
         """
         SELECT payload FROM document_extraction
@@ -139,6 +171,10 @@ def _build_parser() -> argparse.ArgumentParser:
         help="detect and correct page rotation via the VLM before OCR "
         "(off by default: unreliable on sparse/portrait content, see Tier-1 findings)",
     )
+    p_run.add_argument("--classification-max-tokens", type=int, default=32)
+    p_run.add_argument("--classification-temperature", type=float, default=0.0)
+    p_run.add_argument("--classification-max-text-chars", type=int, default=4000)
+    p_run.add_argument("--classification-min-chars", type=int, default=10)
     p_run.add_argument(
         "--auth", choices=["cdsw", "fake"], default="cdsw",
         help="token provider: 'cdsw' (real, not yet implemented) or 'fake' "
@@ -164,12 +200,16 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def main(
+    argv: Sequence[str] | None = None,
+    *,
+    client_factory: Callable[..., Any] = openai.OpenAI,
+) -> int:
     args = _build_parser().parse_args(argv)
     conn = db.connect(args.db)
     try:
         store = StatusStore(conn)
-        return args.func(store, args)
+        return args.func(store, args, client_factory)
     except (StatusStoreError, ExtractionError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

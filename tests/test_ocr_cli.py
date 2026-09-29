@@ -1,10 +1,11 @@
-"""Smoke tests for ps06.ocr.cli (M-2, step 8).
+"""Smoke tests for ps06.ocr.cli (M-2, step 8; classification added M-2.5).
 
 Uses the pdf_with_text_layer fixture (tests/conftest.py) so the text-layer
-fast path is exercised and no VLM/network call happens — ReauthHTTPClient
-still mints a token and constructs a real openai.OpenAI client (object
-construction only, no network), so --auth fake with FakeAuthProvider is
-sufficient to exercise the whole CLI offline.
+fast path is exercised for extraction. Classification (M-2.5) always calls
+the LLM once, though, so tests that actually run a job pass the
+fake_openai_client_factory fixture in via cli.main's client_factory
+parameter — otherwise a real openai.OpenAI client would attempt a real
+network call against the fake --endpoint-url.
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ from ps06.ocr import cli
 from ps06.status import db
 from ps06.status.states import DocumentStage
 from ps06.status.store import StatusStore
+from tests.conftest import FakeOpenAIClient
 
 
 def _run_argv(db_path, *extra):
@@ -44,12 +46,15 @@ def _register(db_path):
 
 class TestRun:
     def test_happy_path_prints_summary_and_persists(
-        self, tmp_path, pdf_with_text_layer, capsys
+        self, tmp_path, pdf_with_text_layer, capsys, fake_openai_client_factory
     ):
         db_path = tmp_path / "ps06.db"
         _register(db_path)
 
-        exit_code = cli.main(_run_argv(db_path, "--file", str(pdf_with_text_layer)))
+        exit_code = cli.main(
+            _run_argv(db_path, "--file", str(pdf_with_text_layer)),
+            client_factory=fake_openai_client_factory,
+        )
 
         assert exit_code == 0
         out = capsys.readouterr().out
@@ -64,13 +69,14 @@ class TestRun:
         assert status.stage == DocumentStage.OCR_DONE
 
     def test_json_flag_prints_valid_ocr_result_json(
-        self, tmp_path, pdf_with_text_layer, capsys
+        self, tmp_path, pdf_with_text_layer, capsys, fake_openai_client_factory
     ):
         db_path = tmp_path / "ps06.db"
         _register(db_path)
 
         exit_code = cli.main(
-            _run_argv(db_path, "--file", str(pdf_with_text_layer), "--json")
+            _run_argv(db_path, "--file", str(pdf_with_text_layer), "--json"),
+            client_factory=fake_openai_client_factory,
         )
 
         assert exit_code == 0
@@ -82,14 +88,15 @@ class TestRun:
         assert payload["extraction"]["file_type"] == "pdf"
 
     def test_auto_register_flag_registers_unregistered_document(
-        self, tmp_path, pdf_with_text_layer
+        self, tmp_path, pdf_with_text_layer, fake_openai_client_factory
     ):
         db_path = tmp_path / "ps06.db"
 
         exit_code = cli.main(
             _run_argv(
                 db_path, "--file", str(pdf_with_text_layer), "--auto-register"
-            )
+            ),
+            client_factory=fake_openai_client_factory,
         )
 
         assert exit_code == 0
@@ -99,6 +106,37 @@ class TestRun:
         finally:
             conn.close()
         assert status.stage == DocumentStage.OCR_DONE
+
+    def test_prints_and_persists_document_type_and_generation(
+        self, tmp_path, pdf_with_text_layer, capsys
+    ):
+        db_path = tmp_path / "ps06.db"
+        _register(db_path)
+
+        def client_factory(*, base_url, api_key):
+            return FakeOpenAIClient(
+                base_url=base_url, api_key=api_key, classification_text="APPLICATION"
+            )
+
+        exit_code = cli.main(
+            _run_argv(
+                db_path,
+                "--file", str(pdf_with_text_layer),
+                "--json",
+                "--classification-max-tokens", "16",
+                "--classification-temperature", "0.5",
+                "--classification-max-text-chars", "500",
+                "--classification-min-chars", "5",
+            ),
+            client_factory=client_factory,
+        )
+
+        assert exit_code == 0
+        out = capsys.readouterr().out
+        assert "document_type=APPLICATION generation=None" in out
+        json_start = out.index("{")
+        payload = json.loads(out[json_start:])
+        assert payload["classification"]["document_type"] == "APPLICATION"
 
     def test_fake_auth_without_tokens_exits_with_error(self, tmp_path, pdf_with_text_layer):
         db_path = tmp_path / "ps06.db"
@@ -119,10 +157,15 @@ class TestRun:
 
 
 class TestShow:
-    def test_show_after_run_matches(self, tmp_path, pdf_with_text_layer, capsys):
+    def test_show_after_run_matches(
+        self, tmp_path, pdf_with_text_layer, capsys, fake_openai_client_factory
+    ):
         db_path = tmp_path / "ps06.db"
         _register(db_path)
-        cli.main(_run_argv(db_path, "--file", str(pdf_with_text_layer)))
+        cli.main(
+            _run_argv(db_path, "--file", str(pdf_with_text_layer)),
+            client_factory=fake_openai_client_factory,
+        )
         capsys.readouterr()
 
         exit_code = cli.main(["--db", str(db_path), "show", "--case", "case-1", "--doc", "doc-1", "--json"])
