@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Any
 
 import pymupdf
-from PIL import Image, ImageOps
+from PIL import Image
 from pydantic import BaseModel, ConfigDict, Field
 
 logger = logging.getLogger(__name__)
@@ -53,18 +53,19 @@ SUPPORTED_EXTENSIONS = {".pdf", *IMAGE_EXTENSIONS}
 DEFAULT_PDF_DPI = 300
 MAX_FILE_SIZE_MB = 50
 
-ORIENTATION_LABELS = frozenset({"NONE", "FLIP_HORIZONTAL", "FLIP_VERTICAL", "ROTATE_180"})
+ORIENTATION_LABELS = frozenset({"NONE", "ROTATE_90", "ROTATE_180", "ROTATE_270"})
 
 ORIENTATION_PROMPT = (
     "You are an image orientation classifier. "
-    "Examine the text in this image and decide whether it is flipped or rotated "
-    "compared to its correct reading orientation.\n\n"
+    "Examine the text in this image and decide how far it is rotated away from its "
+    "correct reading orientation.\n\n"
     "Reply with EXACTLY ONE of the following labels and nothing else — "
     "no punctuation, no explanation, no whitespace before or after:\n\n"
-    "  NONE               — text is already correctly oriented\n"
-    "  FLIP_HORIZONTAL    — text is mirrored left-to-right\n"
-    "  FLIP_VERTICAL      — text is flipped upside-down\n"
-    "  ROTATE_180         — text is rotated 180 degrees\n\n"
+    "  NONE          — text is already correctly oriented, upright and readable\n"
+    "  ROTATE_90     — text is rotated 90 degrees clockwise from upright\n"
+    "  ROTATE_180    — text is rotated 180 degrees (upside-down) from upright\n"
+    "  ROTATE_270    — text is rotated 270 degrees clockwise (i.e. 90 degrees "
+    "counter-clockwise) from upright\n\n"
     "Output only the label."
 )
 
@@ -181,12 +182,15 @@ def _pil_from_b64(b64: str) -> Image.Image:
 
 
 def _correct_orientation(img: Image.Image, label: str) -> Image.Image:
-    if label == "FLIP_HORIZONTAL":
-        return ImageOps.mirror(img)
-    if label == "FLIP_VERTICAL":
-        return ImageOps.flip(img)
+    # PIL's rotate(angle) turns the image counter-clockwise by ``angle`` degrees.
+    # A label of ROTATE_90 means the content is 90 degrees clockwise from upright,
+    # so undoing it requires the same counter-clockwise rotate(90).
+    if label == "ROTATE_90":
+        return img.rotate(90, expand=True)
     if label == "ROTATE_180":
         return img.rotate(180)
+    if label == "ROTATE_270":
+        return img.rotate(270, expand=True)
     return img
 
 

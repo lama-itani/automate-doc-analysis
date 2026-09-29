@@ -12,7 +12,7 @@ import io
 
 import pymupdf
 import pytest
-from PIL import Image, ImageOps
+from PIL import Image
 
 from ps06.ocr.extraction import (
     EmptyDocumentError,
@@ -98,9 +98,9 @@ def test_orientation_none_not_recorded(pdf_without_text_layer):
 @pytest.mark.parametrize(
     ("label", "transform"),
     [
-        ("FLIP_HORIZONTAL", ImageOps.mirror),
-        ("FLIP_VERTICAL", ImageOps.flip),
+        ("ROTATE_90", lambda img: img.rotate(90, expand=True)),
         ("ROTATE_180", lambda img: img.rotate(180)),
+        ("ROTATE_270", lambda img: img.rotate(270, expand=True)),
     ],
 )
 def test_each_orientation_label_applies_expected_transform(pdf_without_text_layer, label, transform):
@@ -134,6 +134,44 @@ def test_unrecognized_orientation_response_defaults_to_none(pdf_without_text_lay
     result = extract(str(pdf_without_text_layer), _config(), client)
 
     assert result.orientation_corrections == {}
+
+
+def test_upright_dense_text_page_not_corrected(tmp_path):
+    """Regression for the Workbench false positive on an upright passport photo:
+    a page with plenty of dense text must pass through untouched when the model
+    (correctly) reports NONE — no flip-family label exists to misfire on it."""
+    doc = pymupdf.open()
+    page = doc.new_page()
+    for line in range(20):
+        page.insert_text((36, 36 + line * 20), "Sample applicant record line " + str(line))
+    path = tmp_path / "dense_text_upright.pdf"
+    doc.save(str(path))
+    doc.close()
+
+    client = FakeVlmClient(orientation_label="NONE", ocr_text="dense upright text")
+    result = extract(str(path), _config(use_text_layer_fast_path=False), client)
+
+    assert result.orientation_corrections == {}
+    assert "[orientation corrected" not in result.extracted_text
+
+
+def test_upright_sparse_mrz_like_page_not_corrected(tmp_path):
+    """Regression for the Workbench false positive on an upright ID back side
+    (MRZ chevrons + QR code, little plain text): must pass through untouched
+    when the model reports NONE."""
+    doc = pymupdf.open()
+    page = doc.new_page()
+    page.draw_rect(pymupdf.Rect(150, 150, 250, 250))  # QR-code-like block
+    page.insert_text((36, 400), "P<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<")
+    path = tmp_path / "sparse_mrz_upright.pdf"
+    doc.save(str(path))
+    doc.close()
+
+    client = FakeVlmClient(orientation_label="NONE", ocr_text="mrz upright text")
+    result = extract(str(path), _config(use_text_layer_fast_path=False), client)
+
+    assert result.orientation_corrections == {}
+    assert "[orientation corrected" not in result.extracted_text
 
 
 def test_multipage_pdf_mixes_fast_path_and_vlm_path(tmp_path):
