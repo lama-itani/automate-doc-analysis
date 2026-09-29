@@ -1,0 +1,66 @@
+# PS-06 Rules Engine configuration (M-4).
+#
+# This file encodes the deterministic business rules of the Lineage Engine
+# (family-lineage matching) and Semaphore Engine (document checklist +
+# ROJO/AMARILLO/VERDE decision), extracted from the AEAD source's "Data
+# Aggregation" agent prompt. Governance: changes to this file require
+# legal/product sign-off before merge (see PS-06 Build Handoff).
+
+gap_bands:
+  # Generational gap, in whole years, between a person and their named
+  # parent/ancestor (e.g. Solicitante -> Progenitor), considered normal.
+  typical:
+    min_years: 20
+    max_years: 35
+  # Outside this band, the assignment is rejected and BRECHA_GENERACIONAL
+  # is raised.
+  hard:
+    min_years: 14
+    max_years: 60
+
+entity_resolution:
+  # Two records are merged into the same resolved person if they match on
+  # at least this many of the 3 signals below.
+  min_criteria: 2
+  total_criteria: 3
+  # Tolerance, in years, for the birth-date match signal.
+  dob_tolerance_years: 1
+
+# The 5 documents every case is expected to contain (Semaphore Engine
+# checklist). Spanish labels are verbatim and must not be translated.
+expected_documents:
+  - label: "Solicitud Principal"
+    document_type: APPLICATION
+  - label: "Identificación del Solicitante"
+    document_type: ID_DOCUMENT
+  - label: "Certificado de Nacimiento del Solicitante"
+    document_type: BIRTH_CERT
+    generation: G1
+  - label: "Certificado de Nacimiento del Progenitor"
+    document_type: BIRTH_CERT
+    generation: G2
+  - label: "Certificado de Nacimiento Español de origen"
+    document_type: BIRTH_CERT
+    generation: G3
+
+# Flag name -> traffic-light severity. Any ROJO flag anywhere in a case
+# forces the case's overall determination to ROJO; AMARILLO flags with no
+# ROJO flags present force AMARILLO; no flags (and all 5 documents present)
+# -> VERDE. A missing expected document is handled structurally (checked
+# against expected_documents above), not as a named flag here — the AEAD
+# source has no discrete flag name for it (it calls it the "MISSING
+# DOCUMENT RULE" and describes it procedurally, unlike the flags below).
+severity:
+  rojo:
+    - DOCUMENTO_VENCIDO
+    - NOMBRE_AMBIGUO
+    - NOMBRE_INCONSISTENTE
+    - ID_INCONSISTENTE
+    - DOCUMENTO_CRUZADO
+    - FECHA_CONFLICTO
+    - BRECHA_GENERACIONAL
+  amarillo:
+    # Verbatim from source: "Document seems incomplete (it has missing key
+    # fields)" — kept in English exactly as the source has it.
+    - DOCUMENT_INCOMPLETE
+    - NACIONALIDAD_INCONSISTENTE

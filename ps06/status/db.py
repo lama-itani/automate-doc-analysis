@@ -110,10 +110,34 @@ def _migration_0002_document_extraction(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migration_0003_rule_evaluation(conn: sqlite3.Connection) -> None:
+    """Create the ``rule_evaluation`` table (M-4: case-level rules-run marker).
+
+    One row per case (not per document, unlike the other two tables) since
+    rules evaluation is a case-level operation over all of a case's documents.
+    Presence of a row is what :func:`ps06.status.aggregate.derive_case_status`
+    reads to know a case has reached ``RULES_EVALUATED``. A re-run overwrites
+    the row rather than accumulating history, consistent with
+    ``document_extraction``'s latest-attempt-only convention.
+    """
+
+    conn.execute(
+        """
+        CREATE TABLE rule_evaluation (
+            case_id      TEXT NOT NULL,
+            evaluated_at TEXT NOT NULL,   -- ISO-8601 UTC
+            payload      TEXT NOT NULL,   -- ReportSnapshot, JSON-serialized
+            PRIMARY KEY (case_id)
+        );
+        """
+    )
+
+
 #: Ordered migration ledger. Append-only.
 MIGRATIONS: list[tuple[int, Callable[[sqlite3.Connection], None]]] = [
     (1, _migration_0001_initial),
     (2, _migration_0002_document_extraction),
+    (3, _migration_0003_rule_evaluation),
 ]
 
 #: Latest schema version defined in this module.

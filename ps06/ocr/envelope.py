@@ -27,6 +27,7 @@ from pydantic import BaseModel, ConfigDict
 
 from ps06.classification.classifier import ClassificationResult
 from ps06.ocr.extraction import ExtractionResult
+from ps06.status.store import StatusStore
 
 
 def _utcnow_iso() -> str:
@@ -78,3 +79,23 @@ class OcrResult(BaseModel):
             model_name=model_name,
             extracted_at=_utcnow_iso(),
         )
+
+
+def get_extraction(
+    store: StatusStore, case_id: str, document_id: str
+) -> OcrResult | None:
+    """Read one document's persisted ``OcrResult``, or ``None`` if not yet extracted.
+
+    The shared accessor for the ``document_extraction`` table's ``payload``
+    column, replacing ad hoc raw-SQL reads (e.g. ``ocr/cli.py::_cmd_show``).
+    """
+    row = store.connection.execute(
+        """
+        SELECT payload FROM document_extraction
+         WHERE case_id = ? AND document_id = ?;
+        """,
+        (case_id, document_id),
+    ).fetchone()
+    if row is None:
+        return None
+    return OcrResult.model_validate_json(row["payload"])
