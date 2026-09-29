@@ -247,9 +247,18 @@ class StatusStore:
         registered documents.
 
         Aggregates the case's document stages via
-        :func:`ps06.status.aggregate.derive_case_status`.
+        :func:`ps06.status.aggregate.derive_case_status`, along with whether a
+        ``rule_evaluation`` row exists for the case (M-4's ``RULES_EVALUATED``).
         """
         docs = self.list_for_case(case_id)
         if not docs:
             return None
-        return derive_case_status(d.stage for d in docs)
+        rules_evaluated = (
+            self._conn.execute(
+                "SELECT 1 FROM rule_evaluation WHERE case_id = ?;", (case_id,)
+            ).fetchone()
+            is not None
+        )
+        return derive_case_status(
+            (d.stage for d in docs), rules_evaluated=rules_evaluated
+        )

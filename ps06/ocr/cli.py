@@ -29,7 +29,7 @@ import openai
 
 from ps06.classification.classifier import ClassificationConfig
 from ps06.ocr.auth import AuthProvider, CDSWAuthProvider, FakeAuthProvider
-from ps06.ocr.envelope import OcrResult
+from ps06.ocr.envelope import OcrResult, get_extraction
 from ps06.ocr.extraction import DEFAULT_PDF_DPI, ExtractionError, OcrJobConfig
 from ps06.ocr.job import run as run_job
 from ps06.status import db
@@ -117,21 +117,14 @@ def _cmd_show(
     args: argparse.Namespace,
     client_factory: Callable[..., Any],
 ) -> int:
-    row = store.connection.execute(
-        """
-        SELECT payload FROM document_extraction
-         WHERE case_id = ? AND document_id = ?;
-        """,
-        (args.case, args.doc),
-    ).fetchone()
-    if row is None:
+    result = get_extraction(store, args.case, args.doc)
+    if result is None:
         print(
             f"error: no extraction found for case={args.case!r} document={args.doc!r}",
             file=sys.stderr,
         )
         return 1
 
-    result = OcrResult.model_validate_json(row["payload"])
     _print_result(result)
     if args.json:
         print(result.model_dump_json(indent=2))

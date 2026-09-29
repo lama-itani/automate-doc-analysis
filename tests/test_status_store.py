@@ -75,7 +75,7 @@ class TestStates:
 class TestDbMigrations:
     def test_connect_migrates_to_latest(self):
         conn = db.connect()
-        assert db._current_version(conn) == db.SCHEMA_VERSION == 2
+        assert db._current_version(conn) == db.SCHEMA_VERSION == 3
 
     def test_schema_shape(self):
         conn = db.connect()
@@ -110,12 +110,20 @@ class TestDbMigrations:
         assert cols["document_id"]["pk"] == 2
         assert cols["payload"]["notnull"] == 1
 
+    def test_rule_evaluation_schema_shape(self):
+        conn = db.connect()
+        cols = {r["name"]: r for r in conn.execute("PRAGMA table_info(rule_evaluation)")}
+        assert set(cols) == {"case_id", "evaluated_at", "payload"}
+        assert cols["case_id"]["pk"] == 1
+        assert cols["evaluated_at"]["notnull"] == 1
+        assert cols["payload"]["notnull"] == 1
+
     def test_migrate_is_idempotent(self):
         conn = db.connect()
         db.migrate(conn)
         db.migrate(conn)
         count = conn.execute("SELECT COUNT(*) FROM schema_version").fetchone()[0]
-        assert count == 2
+        assert count == 3
 
     def test_busy_timeout_set(self):
         # busy_timeout is set explicitly so a blocked concurrent writer waits
@@ -138,7 +146,7 @@ class TestDbMigrations:
         assert path.exists()
         # reconnect: migration is a no-op and data survives
         conn2 = db.connect(path)
-        assert db._current_version(conn2) == 2
+        assert db._current_version(conn2) == 3
         assert StatusStore(conn2).get("C", "d") is not None
 
 
@@ -285,6 +293,30 @@ class TestDeriveCaseStatus:
         with pytest.raises(ValueError):
             derive_case_status([])
 
+    def test_rules_evaluated_when_all_ocr_done_and_flag_set(self):
+        assert (
+            derive_case_status(
+                [DocumentStage.OCR_DONE, DocumentStage.OCR_DONE], rules_evaluated=True
+            )
+            is CaseStatus.RULES_EVALUATED
+        )
+
+    def test_rules_evaluated_flag_ignored_when_not_all_ocr_done(self):
+        assert (
+            derive_case_status(
+                [DocumentStage.RECEIVED, DocumentStage.OCR_DONE], rules_evaluated=True
+            )
+            is CaseStatus.RECEIVED
+        )
+
+    def test_failure_dominates_even_when_rules_evaluated(self):
+        assert (
+            derive_case_status(
+                [DocumentStage.OCR_DONE, DocumentStage.FAILED], rules_evaluated=True
+            )
+            is CaseStatus.FAILED
+        )
+
 
 # --- aggregation via store --------------------------------------------------
 
@@ -306,3 +338,30 @@ class TestCaseStatusViaStore:
 
         store.transition("C1", "b", DocumentStage.FAILED, error_detail="boom")
         assert store.case_status("C1") is CaseStatus.FAILED  # failure dominates
+
+    def test_rules_evaluated_when_rule_evaluation_row_present(self, store):
+        store.register_document("C2", "a")
+        store.transition("C2", "a", DocumentStage.OCR_DONE)
+        assert store.case_status("C2") is CaseStatus.OCR_DONE
+
+        with store.connection:
+            store.connection.execute(
+                "INSERT INTO rule_evaluation (case_id, evaluated_at, payload) "
+                "VALUES (?, ?, ?);",
+                ("C2", "2026-09-29T00:00:00Z", "{}"),
+            )
+        assert store.case_status("C2") is CaseStatus.RULES_EVALUATED
+
+    def test_rule_evaluation_row_ignored_when_case_still_processing(self, store):
+        store.register_document("C3", "a")
+        store.register_document("C3", "b")
+        store.transition("C3", "a", DocumentStage.OCR_DONE)
+
+        with store.connection:
+            store.connection.execute(
+                "INSERT INTO rule_evaluation (case_id, evaluated_at, payload) "
+                "VALUES (?, ?, ?);",
+                ("C3", "2026-09-29T00:00:00Z", "{}"),
+            )
+        # b is still RECEIVED, so RULES_EVALUATED is not yet reachable.
+        assert store.case_status("C3") is CaseStatus.RECEIVED
