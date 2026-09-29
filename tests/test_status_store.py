@@ -20,6 +20,7 @@ from ps06.status.store import (
     DocumentStatus,
     InvalidTransition,
     StatusStore,
+    TransitionConflict,
 )
 
 
@@ -116,6 +117,19 @@ class TestDbMigrations:
         count = conn.execute("SELECT COUNT(*) FROM schema_version").fetchone()[0]
         assert count == 2
 
+    def test_busy_timeout_set(self):
+        # busy_timeout is set explicitly so a blocked concurrent writer waits
+        # instead of failing immediately (HARDENING_NOTES #1).
+        conn = db.connect()
+        assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == db.BUSY_TIMEOUT_MS
+
+    def test_wal_journal_mode_file_backed(self, tmp_path):
+        # WAL is a persistent file-level mode; it takes effect for file-backed
+        # DBs (concurrent per-document writers, HARDENING_NOTES #1). :memory:
+        # can't use WAL, so this is asserted only on a file-backed DB.
+        conn = db.connect(tmp_path / "wal.db")
+        assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+
     def test_file_backed_persists(self, tmp_path):
         path = tmp_path / "nested" / "status.db"
         conn1 = db.connect(path)
@@ -196,6 +210,25 @@ class TestTransitions:
         store.transition("C1", "docA", DocumentStage.RECEIVED)  # leaving FAILED -> attempt 2
         s = store.transition("C1", "docA", DocumentStage.OCR_DONE)  # progress, no bump
         assert s.attempt_count == 2
+
+    def test_transition_conflict_when_stage_changed_concurrently(self, store, monkeypatch):
+        # HARDENING_NOTES #2: the compare-and-swap UPDATE is guarded on the stage
+        # the call validated against. Simulate a concurrent writer by making the
+        # initial read observe a stale stage (OCR_DONE) that no longer matches the
+        # real row (RECEIVED) — the guarded UPDATE then matches zero rows.
+        store.register_document("C1", "docA")  # real stage RECEIVED
+        stale = DocumentStatus(
+            case_id="C1",
+            document_id="docA",
+            stage=DocumentStage.OCR_DONE,  # validates OCR_DONE -> FAILED as legal
+            attempt_count=1,
+            last_updated="2026-01-01T00:00:00Z",
+        )
+        monkeypatch.setattr(store, "get_or_raise", lambda c, d: stale)
+        with pytest.raises(TransitionConflict):
+            store.transition("C1", "docA", DocumentStage.FAILED, error_detail="x")
+        # the real row was not clobbered
+        assert store.get("C1", "docA").stage is DocumentStage.RECEIVED
 
 
 # --- store: reads -----------------------------------------------------------
