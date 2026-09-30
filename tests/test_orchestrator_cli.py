@@ -72,6 +72,50 @@ class TestRunCase:
                 ]
             )
 
+    def test_run_case_with_folder_drives_all_to_ocr_done(
+        self, tmp_path, pdf_with_text_layer, fake_openai_client_factory
+    ):
+        db_path = tmp_path / "ps06.db"
+        case_folder = tmp_path / "case_folder"
+        case_folder.mkdir()
+        (case_folder / "d1.pdf").write_bytes(pdf_with_text_layer.read_bytes())
+        (case_folder / "d2.pdf").write_bytes(pdf_with_text_layer.read_bytes())
+        rc = main(
+            [
+                "--db", str(db_path), "run-case", "--case", "C1",
+                "--folder", str(case_folder),
+                "--auto-register", "--max-concurrency", "2",
+                *_endpoint_args(),
+            ],
+            client_factory=fake_openai_client_factory,
+        )
+        assert rc == 0
+        store = StatusStore(db.connect(db_path))
+        assert store.get("C1", "d1").stage is DocumentStage.OCR_DONE
+        assert store.get("C1", "d2").stage is DocumentStage.OCR_DONE
+
+    def test_doc_and_folder_together_exits(self, tmp_path, pdf_with_text_layer):
+        db_path = tmp_path / "ps06.db"
+        pdf = str(pdf_with_text_layer)
+        with pytest.raises(SystemExit):
+            main(
+                [
+                    "--db", str(db_path), "run-case", "--case", "C1",
+                    "--doc", f"d1={pdf}", "--folder", str(tmp_path),
+                    *_endpoint_args(),
+                ]
+            )
+
+    def test_neither_doc_nor_folder_exits(self, tmp_path):
+        db_path = tmp_path / "ps06.db"
+        with pytest.raises(SystemExit):
+            main(
+                [
+                    "--db", str(db_path), "run-case", "--case", "C1",
+                    *_endpoint_args(),
+                ]
+            )
+
     def test_fake_auth_requires_token(self, tmp_path, pdf_with_text_layer):
         db_path = tmp_path / "ps06.db"
         pdf = str(pdf_with_text_layer)

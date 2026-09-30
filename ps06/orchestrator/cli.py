@@ -18,6 +18,11 @@ Usage (no reinstall needed)::
         --endpoint-url http://fake --model-name test-model \\
         --auth fake --fake-token tok --auto-register
 
+    python -m ps06.orchestrator.cli --db ps06.db run-case \\
+        --case C1 --folder /path/to/case_folder \\
+        --endpoint-url http://fake --model-name test-model \\
+        --auth fake --fake-token tok --auto-register
+
     python -m ps06.orchestrator.cli --db ps06.db status --case C1
 
     python -m ps06.orchestrator.cli --db ps06.db retry-failed \\
@@ -30,18 +35,22 @@ from __future__ import annotations
 import argparse
 import sys
 from collections.abc import Callable, Sequence
+from datetime import date
 from typing import Any
 
 import openai
 
 from ps06.ocr.auth import AuthProvider, CDSWAuthProvider, FakeAuthProvider
 from ps06.ocr.extraction import DEFAULT_PDF_DPI, OcrJobConfig
+from ps06.orchestrator import intake
 from ps06.orchestrator.launcher import LocalThreadJobLauncher
 from ps06.orchestrator.orchestrator import (
     CaseSummary,
     OrchestratorConfig,
     process_case,
 )
+from ps06.rules.adapter import MissingExtractionError
+from ps06.rules.rules_config import RulesConfig
 from ps06.status import db
 from ps06.status.states import DocumentStage
 from ps06.status.store import DocumentAlreadyExists, StatusStore, StatusStoreError
@@ -60,6 +69,16 @@ def _parse_documents(pairs: Sequence[str]) -> dict[str, str]:
             raise SystemExit(f"error: duplicate --doc id {doc_id!r}")
         documents[doc_id] = path
     return documents
+
+
+def _resolve_documents(args: argparse.Namespace) -> dict[str, str]:
+    """Build the ``document_id -> path`` map from whichever of ``--doc``/
+    ``--folder`` was supplied (mutually exclusive, exactly one required)."""
+    if bool(args.doc) == bool(args.folder):
+        raise SystemExit("error: pass exactly one of --doc or --folder")
+    if args.folder:
+        return intake.scan_folder(args.folder)
+    return _parse_documents(args.doc)
 
 
 def _build_auth_factory(args: argparse.Namespace) -> Callable[[], AuthProvider]:
@@ -94,6 +113,12 @@ def _build_orchestrator_config(args: argparse.Namespace) -> OrchestratorConfig:
     )
 
 
+def _build_rules_config(args: argparse.Namespace) -> RulesConfig:
+    if args.rules_config is None:
+        return RulesConfig()
+    return RulesConfig.from_yaml(args.rules_config)
+
+
 def _print_summary(summary: CaseSummary) -> None:
     status = summary.case_status.value if summary.case_status else "(no documents)"
     print(
@@ -120,9 +145,19 @@ def _drive(
         client_factory=client_factory,
         max_workers=args.max_concurrency,
     )
+    evaluation_date = (
+        date.fromisoformat(args.evaluation_date) if args.evaluation_date else None
+    )
     with launcher:
         summary = process_case(
-            args.case, documents, launcher, store, _build_orchestrator_config(args)
+            args.case,
+            documents,
+            launcher,
+            store,
+            _build_orchestrator_config(args),
+            evaluate_rules=args.evaluate_rules,
+            rules_config=_build_rules_config(args) if args.evaluate_rules else None,
+            evaluation_date=evaluation_date,
         )
     _print_summary(summary)
     if args.json:
@@ -135,7 +170,7 @@ def _cmd_run_case(
     args: argparse.Namespace,
     client_factory: Callable[..., Any],
 ) -> int:
-    documents = _parse_documents(args.doc)
+    documents = _resolve_documents(args)
     if args.auto_register:
         for doc_id in documents:
             try:
@@ -150,7 +185,7 @@ def _cmd_retry_failed(
     args: argparse.Namespace,
     client_factory: Callable[..., Any],
 ) -> int:
-    documents = _parse_documents(args.doc)
+    documents = _resolve_documents(args)
     failed = {
         doc_id: path
         for doc_id, path in documents.items()
@@ -190,9 +225,16 @@ def _add_drive_args(p: argparse.ArgumentParser) -> None:
     p.add_argument(
         "--doc",
         action="append",
-        required=True,
         metavar="ID=PATH",
-        help="document id and source file path (repeatable)",
+        help="document id and source file path (repeatable); mutually "
+        "exclusive with --folder",
+    )
+    p.add_argument(
+        "--folder",
+        default=None,
+        help="scan this folder's top-level files for documents instead of "
+        "listing --doc pairs (mutually exclusive with --doc); folder-found "
+        "documents likely aren't pre-registered, so pair with --auto-register",
     )
     p.add_argument("--endpoint-url", required=True)
     p.add_argument("--model-name", required=True)
@@ -230,6 +272,23 @@ def _add_drive_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--max-concurrency", type=int, default=3)
     p.add_argument("--max-attempts", type=int, default=3)
     p.add_argument("--poll-interval", type=float, default=1.0)
+    p.add_argument(
+        "--evaluate-rules",
+        action="store_true",
+        default=False,
+        help="once all documents reach OCR_DONE, also run the rules engine "
+        "(ps06.rules.engine.evaluate_case) for this case",
+    )
+    p.add_argument(
+        "--rules-config", default=None,
+        help="path to a rules.yaml override for --evaluate-rules (default: "
+        "built-in RulesConfig() defaults)",
+    )
+    p.add_argument(
+        "--evaluation-date", default=None,
+        help="ISO-8601 date to evaluate document expiry against for "
+        "--evaluate-rules (default: today)",
+    )
     p.add_argument("--json", action="store_true", help="also print the CaseSummary as JSON")
 
 
@@ -276,7 +335,7 @@ def main(
     try:
         store = StatusStore(conn)
         return args.func(store, args, client_factory)
-    except StatusStoreError as exc:
+    except (StatusStoreError, MissingExtractionError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     finally:
