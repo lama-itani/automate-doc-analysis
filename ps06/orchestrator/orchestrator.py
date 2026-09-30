@@ -32,8 +32,9 @@ treats it. The ``documents`` mapping supplies the ``document_id -> file path``
 handoff (the status table does not store paths).
 
 Scope boundary: the orchestrator *reports* case readiness (all documents
-``OCR_DONE`` -> ``CaseStatus.OCR_DONE``); it does not trigger rules/aggregation —
-that is M-4.
+``OCR_DONE`` -> ``CaseStatus.OCR_DONE``). Triggering rules/aggregation (M-4) is
+opt-in via ``process_case(..., evaluate_rules=True)`` (step 12) — off by default
+so existing OCR-only callers are unaffected.
 """
 
 from __future__ import annotations
@@ -41,10 +42,13 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Mapping
+from datetime import date
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from ps06.orchestrator.launcher import JobHandle, JobLauncher
+from ps06.rules.engine import evaluate_case
+from ps06.rules.rules_config import RulesConfig
 from ps06.status.states import CaseStatus, DocumentStage
 from ps06.status.store import StatusStore
 
@@ -126,6 +130,10 @@ def process_case(
     launcher: JobLauncher,
     store: StatusStore,
     config: OrchestratorConfig | None = None,
+    *,
+    evaluate_rules: bool = False,
+    rules_config: RulesConfig | None = None,
+    evaluation_date: date | None = None,
 ) -> CaseSummary:
     """Drive ``case_id``'s ``documents`` to terminal states and return a summary.
 
@@ -134,6 +142,17 @@ def process_case(
     ``FAILED`` with attempts exhausted, then returns a :class:`CaseSummary`.
     Idempotent/resumable: documents already ``OCR_DONE`` are left alone, and
     ``FAILED`` documents with attempts remaining are retried.
+
+    If ``evaluate_rules`` is true and the case's derived status is
+    ``CaseStatus.OCR_DONE`` (every document reached ``OCR_DONE``, none
+    ``FAILED``) once processing stops, this also calls
+    :func:`ps06.rules.engine.evaluate_case` before returning — chaining
+    ingest -> OCR/classification -> rules into one call for end-to-end runs.
+    A case with any ``FAILED`` document is left at ``CaseStatus.FAILED``;
+    rules evaluation is skipped, matching M-4's "missing fields never a
+    silent VERDE" stance. Any exception from ``evaluate_case`` (e.g.
+    ``MissingExtractionError``) propagates unwrapped, same as the engine's
+    own contract.
     """
     config = config or OrchestratorConfig()
 
@@ -181,6 +200,15 @@ def process_case(
         # 4. Wait before the next reconciliation sweep.
         if config.poll_interval_seconds:
             time.sleep(config.poll_interval_seconds)
+
+    if evaluate_rules and store.case_status(case_id) is CaseStatus.OCR_DONE:
+        logger.info("triggering rules evaluation: case=%s", case_id)
+        evaluate_case(
+            case_id,
+            store,
+            rules_config or RulesConfig(),
+            evaluation_date or date.today(),
+        )
 
     return _build_summary(store, case_id, documents)
 
