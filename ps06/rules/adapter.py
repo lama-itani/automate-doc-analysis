@@ -141,6 +141,13 @@ def _adapt_solicitud(
     signed iff its matched field has a non-empty (post-strip) value — no
     AcroForm signature-widget or text-layer heuristic yet, per user decision;
     revisit if the Tier-3 re-run shows this is insufficient.
+
+    Anexo III/IV only: ``lugar_presentacion``/``fecha_presentacion`` are a
+    many:1 composition (not a 1:1 field, so not in the positional maps above)
+    built from the signing-block widgets ``En``/``a``/``de``/``de-0``.
+    ``fecha_presentacion`` is only set when all three date parts are present
+    — Anexo III has no ``a`` (day) widget in the real template today, so this
+    naturally no-ops there rather than guessing a substitute field.
     """
     fields = {**acroform_fields, **xfa_fields}
     positional_map = _ANEXO_VARIANT_FIELD_MAPS.get(anexo_variant, {})
@@ -153,6 +160,14 @@ def _adapt_solicitud(
             matched[attr] = value
         elif attr == "firma":
             matched["firma"] = bool(value and value.strip())
+
+    if anexo_variant == "ANEXO_III_IV":
+        lugar = fields.get("En")
+        if lugar and lugar.strip():
+            matched["lugar_presentacion"] = lugar
+        dia, mes, anio = fields.get("a"), fields.get("de"), fields.get("de-0")
+        if dia and dia.strip() and mes and mes.strip() and anio and anio.strip():
+            matched["fecha_presentacion"] = f"{dia}/{mes}/{anio}"
 
     missing = tuple(
         attr

@@ -70,3 +70,7 @@ severity:
     # fields)" — kept in English exactly as the source has it.
     - DOCUMENT_INCOMPLETE
     - NACIONALIDAD_INCONSISTENTE
+    # The application's fecha_presentacion is missing/unparseable, so
+    # DOCUMENTO_VENCIDO cannot be evaluated against it — raised instead of
+    # silently falling back to evaluation_date (see semaphore.py).
+    - FECHA_PRESENTACION_FALTANTE

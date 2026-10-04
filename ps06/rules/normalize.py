@@ -234,6 +234,7 @@ _SPANISH_DE_DATE_RE = re.compile(
     r"^(\d{1,2})\s+de\s+([a-zñ]+)\s+de\s+(\d{3,4})$"
 )
 _SPANISH_SLASH_MONTH_RE = re.compile(r"^(\d{1,2})/([a-zñ]+)/(\d{3,4})$")
+_SPANISH_SPACE_MONTH_RE = re.compile(r"^(\d{1,2})\s+([a-zñ]+)\s+(\d{3,4})$")
 _SPANISH_WORDS_DATE_RE = re.compile(r"^(\d{1,2})\s+([a-zñ]+)\s+([a-zñ\s]+)$")
 
 
@@ -263,12 +264,17 @@ def _spanish_year_words_to_int(words: list[str]) -> Optional[int]:
 
 def _parse_spanish_named_date(candidate: str) -> Optional[date]:
     """Parse Spanish month-name dates: ``30/Nov/2015``, ``30 de noviembre de
-    2015``, or a fully spelled-out date including a worded year (e.g. ``27
-    SEPTIEMBRE MIL NOVECIENTOS SESENTA``). Returns ``None`` on no match.
+    2015``, ``22 Octubre 2025`` (plain spaces, no "de"), or a fully
+    spelled-out date including a worded year (e.g. ``27 SEPTIEMBRE MIL
+    NOVECIENTOS SESENTA``). Returns ``None`` on no match.
     """
     lowered = candidate.lower()
 
-    match = _SPANISH_SLASH_MONTH_RE.match(lowered) or _SPANISH_DE_DATE_RE.match(lowered)
+    match = (
+        _SPANISH_SLASH_MONTH_RE.match(lowered)
+        or _SPANISH_DE_DATE_RE.match(lowered)
+        or _SPANISH_SPACE_MONTH_RE.match(lowered)
+    )
     if match:
         day, month_name, year = match.groups()
         month = _SPANISH_MONTHS.get(month_name)
