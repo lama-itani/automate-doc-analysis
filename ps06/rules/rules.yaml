@@ -26,6 +26,12 @@ entity_resolution:
   # Tolerance, in years, for the birth-date match signal.
   dob_tolerance_years: 1
 
+# DOCUMENTO_VENCIDO is checked against the application's own
+# fecha_presentacion plus this many months, not the run's evaluation_date --
+# a passport must still be valid this far past when the applicant actually
+# applied, not past whatever day the pipeline happens to run.
+document_validity_months_past_application: 6
+
 # The 5 documents every case is expected to contain (Semaphore Engine
 # checklist). Spanish labels are verbatim and must not be translated.
 expected_documents:

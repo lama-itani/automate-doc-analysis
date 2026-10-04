@@ -30,6 +30,7 @@ def test_default_config_constructs_with_baked_in_values():
     assert cfg.entity_resolution.min_criteria == 2
     assert cfg.entity_resolution.total_criteria == 3
     assert cfg.entity_resolution.dob_tolerance_years == 1
+    assert cfg.document_validity_months_past_application == 6
 
 
 def test_default_config_is_frozen():

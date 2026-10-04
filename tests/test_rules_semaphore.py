@@ -132,6 +132,28 @@ def test_evaluate_document_vencido_false_when_expiry_future():
     assert "DOCUMENTO_VENCIDO" not in evaluation.flags
 
 
+def test_evaluate_document_uses_vencimiento_reference_date_over_evaluation_date():
+    doc = _doc(
+        "d1",
+        DocumentType.ID_DOCUMENT,
+        identidad=IdData(fecha_vencimiento="01/01/2026"),
+    )
+    # Still valid as of EVAL_DATE (2026-09-29), but the explicit reference
+    # date (e.g. application date + validity buffer) has already passed it.
+    evaluation = evaluate_document(doc, EVAL_DATE, date(2026, 2, 1))
+    assert "DOCUMENTO_VENCIDO" in evaluation.flags
+
+
+def test_evaluate_document_falls_back_to_evaluation_date_when_reference_absent():
+    doc = _doc(
+        "d1",
+        DocumentType.ID_DOCUMENT,
+        identidad=IdData(fecha_vencimiento="01/01/2020"),
+    )
+    evaluation = evaluate_document(doc, EVAL_DATE, None)
+    assert "DOCUMENTO_VENCIDO" in evaluation.flags
+
+
 # --- check_expected_documents ------------------------------------------------
 
 
@@ -243,6 +265,35 @@ def test_verde_when_five_of_five_present_zero_flags_and_corroborated():
 
 
 # --- each ROJO flag individually forces ROJO --------------------------------
+
+
+def test_documento_vencido_uses_application_date_not_evaluation_date():
+    """A passport valid as of EVAL_DATE but within 6 months of the case's
+    own application date (fecha_presentacion) must still flag -- this is the
+    realistic standard, not "has today's wall-clock date passed yet"."""
+    docs = _full_case()
+    for doc in docs:
+        if doc.document_type is DocumentType.APPLICATION:
+            docs[docs.index(doc)] = _doc(
+                "app",
+                DocumentType.APPLICATION,
+                solicitud=SolicitudData(
+                    nombre_solicitante="Ana",
+                    apellido_padre="Garcia",
+                    numero_id="1",
+                    fecha_presentacion="01/10/2025",
+                ),
+            )
+    docs.append(
+        _doc(
+            "id_expired",
+            DocumentType.ID_DOCUMENT,
+            identidad=IdData(fecha_vencimiento="01/01/2026"),
+        )
+    )
+    decision = _decide(*docs)
+    assert decision.estado == "ROJO"
+    assert "DOCUMENTO_VENCIDO" in decision.rojo_flags
 
 
 def test_documento_vencido_forces_rojo():

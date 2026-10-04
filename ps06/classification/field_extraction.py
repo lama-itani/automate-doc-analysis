@@ -30,6 +30,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from ps06.classification.classifier import DocumentType
+from ps06.rules.normalize import strip_vlm_artifacts
 from ps06.rules.schemas import CERTIFICADO_SOURCE_LABELS, ID_SOURCE_LABELS
 
 logger = logging.getLogger(__name__)
@@ -180,7 +181,7 @@ def _parse_extraction_response(raw: str, label_index: dict[str, str]) -> dict[st
     degrade-never-fabricate posture as ``classifier._parse_classification_response``.
     """
     try:
-        parsed = json.loads(raw)
+        parsed = json.loads(strip_vlm_artifacts(raw))
     except (json.JSONDecodeError, TypeError):
         logger.debug("field extraction response not valid JSON raw=%r", raw)
         return {}

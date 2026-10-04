@@ -27,6 +27,7 @@ Pure text/string functions only — no I/O, no model calls.
 
 from __future__ import annotations
 
+import calendar
 import re
 import unicodedata
 from datetime import date, datetime
@@ -115,6 +116,31 @@ def names_match(a: Optional[str], b: Optional[str]) -> bool:
     return bool(fa) and fa == fb
 
 
+# ---------------------------------------------------------------------------
+# Nationality normalization (code vs. adjective, e.g. "ESP" vs "Española")
+# ---------------------------------------------------------------------------
+
+#: ISO 3166-1 alpha-3/alpha-2 codes seen in source documents (e.g. a passport's
+#: MRZ) mapped to the Spanish nationality adjective used elsewhere in the same
+#: case's documents. Scoped to codes actually observed in test data — extend
+#: as more folders are tested, not a general ISO 3166 lookup.
+_NATIONALITY_CODE_TO_NAME: dict[str, str] = {
+    "ESP": "Española",
+    "ES": "Española",
+}
+
+
+def fold_nationality(value: Optional[str]) -> str:
+    """Fold a nationality field for comparison: resolve an ISO code (e.g.
+    ``ESP``) to its Spanish adjective (``Española``) before applying
+    :func:`fold_name`, so a code and its spelled-out equivalent compare equal.
+    """
+    if not value:
+        return ""
+    resolved = _NATIONALITY_CODE_TO_NAME.get(nfkc(value).strip().upper(), value)
+    return fold_name(resolved)
+
+
 def names_fuzzy_match(a: Optional[str], b: Optional[str]) -> bool:
     """Loose match after :func:`fold_name`: exact, or one folded name contains
     the other as a whole-token subsequence (handles a missing middle name or
@@ -164,7 +190,110 @@ _DATE_FORMATS: tuple[str, ...] = (
     "%d-%m-%Y",
     "%Y-%m-%d",
     "%d.%m.%Y",
+    "%d %m %Y",
 )
+
+#: Spanish month names/abbreviations, e.g. ``30/Nov/2015`` or ``30 de
+#: noviembre de 2015``. ``strptime``'s ``%b``/``%B`` are locale-dependent (and
+#: default to English), so month names are resolved through this table
+#: instead of relying on the platform locale.
+_SPANISH_MONTHS: dict[str, int] = {
+    "enero": 1, "ene": 1,
+    "febrero": 2, "feb": 2,
+    "marzo": 3, "mar": 3,
+    "abril": 4, "abr": 4,
+    "mayo": 5, "may": 5,
+    "junio": 6, "jun": 6,
+    "julio": 7, "jul": 7,
+    "agosto": 8, "ago": 8,
+    "septiembre": 9, "setiembre": 9, "sep": 9, "sept": 9,
+    "octubre": 10, "oct": 10,
+    "noviembre": 11, "nov": 11,
+    "diciembre": 12, "dic": 12,
+}
+
+#: Spanish number words needed to parse a spelled-out year, e.g. "MIL
+#: NOVECIENTOS SESENTA" (1960). Scoped to the vocabulary actually seen in
+#: source documents (whole hundreds/tens/units plus "mil"), not a general
+#: Spanish numeral parser.
+_SPANISH_UNITS: dict[str, int] = {
+    "cero": 0, "uno": 1, "una": 1, "dos": 2, "tres": 3, "cuatro": 4,
+    "cinco": 5, "seis": 6, "siete": 7, "ocho": 8, "nueve": 9,
+}
+_SPANISH_TENS: dict[str, int] = {
+    "diez": 10, "veinte": 20, "treinta": 30, "cuarenta": 40, "cincuenta": 50,
+    "sesenta": 60, "setenta": 70, "ochenta": 80, "noventa": 90,
+}
+_SPANISH_HUNDREDS: dict[str, int] = {
+    "cien": 100, "ciento": 100, "doscientos": 200, "trescientos": 300,
+    "cuatrocientos": 400, "quinientos": 500, "seiscientos": 600,
+    "setecientos": 700, "ochocientos": 800, "novecientos": 900,
+}
+
+_SPANISH_DE_DATE_RE = re.compile(
+    r"^(\d{1,2})\s+de\s+([a-zñ]+)\s+de\s+(\d{3,4})$"
+)
+_SPANISH_SLASH_MONTH_RE = re.compile(r"^(\d{1,2})/([a-zñ]+)/(\d{3,4})$")
+_SPANISH_WORDS_DATE_RE = re.compile(r"^(\d{1,2})\s+([a-zñ]+)\s+([a-zñ\s]+)$")
+
+
+def _spanish_year_words_to_int(words: list[str]) -> Optional[int]:
+    """Convert spelled-out Spanish year words (e.g. ``["mil", "novecientos",
+    "sesenta"]`` -> 1960) to an int, or ``None`` if any token is unrecognized.
+    """
+    total = 0
+    current = 0
+    for word in words:
+        if word == "y":
+            continue
+        if word == "mil":
+            total += (current or 1) * 1000
+            current = 0
+        elif word in _SPANISH_HUNDREDS:
+            current += _SPANISH_HUNDREDS[word]
+        elif word in _SPANISH_TENS:
+            current += _SPANISH_TENS[word]
+        elif word in _SPANISH_UNITS:
+            current += _SPANISH_UNITS[word]
+        else:
+            return None
+    total += current
+    return total or None
+
+
+def _parse_spanish_named_date(candidate: str) -> Optional[date]:
+    """Parse Spanish month-name dates: ``30/Nov/2015``, ``30 de noviembre de
+    2015``, or a fully spelled-out date including a worded year (e.g. ``27
+    SEPTIEMBRE MIL NOVECIENTOS SESENTA``). Returns ``None`` on no match.
+    """
+    lowered = candidate.lower()
+
+    match = _SPANISH_SLASH_MONTH_RE.match(lowered) or _SPANISH_DE_DATE_RE.match(lowered)
+    if match:
+        day, month_name, year = match.groups()
+        month = _SPANISH_MONTHS.get(month_name)
+        if month is None:
+            return None
+        try:
+            return date(int(year), month, int(day))
+        except ValueError:
+            return None
+
+    match = _SPANISH_WORDS_DATE_RE.match(lowered)
+    if match:
+        day, month_name, year_words = match.groups()
+        month = _SPANISH_MONTHS.get(month_name)
+        if month is None:
+            return None
+        year = _spanish_year_words_to_int(year_words.split())
+        if year is None:
+            return None
+        try:
+            return date(year, month, int(day))
+        except ValueError:
+            return None
+
+    return None
 
 
 def parse_date(value: Optional[str]) -> Optional[date]:
@@ -181,7 +310,7 @@ def parse_date(value: Optional[str]) -> Optional[date]:
             return datetime.strptime(candidate, fmt).date()
         except ValueError:
             continue
-    return None
+    return _parse_spanish_named_date(candidate)
 
 
 def years_between(earlier: date, later: date) -> int:
@@ -208,3 +337,17 @@ def dates_within_years(a: Optional[date], b: Optional[date], *, tolerance_years:
         return False
     earlier, later = (a, b) if a <= b else (b, a)
     return years_between(earlier, later) <= tolerance_years
+
+
+def add_months(d: date, months: int) -> date:
+    """Add ``months`` calendar months to ``d``.
+
+    Clamps the day to the resulting month's last day when the original day
+    doesn't exist there (e.g. 31 Jan + 1 month -> 28/29 Feb), rather than
+    raising or silently overflowing into the following month.
+    """
+    month_index = d.month - 1 + months
+    year = d.year + month_index // 12
+    month = month_index % 12 + 1
+    day = min(d.day, calendar.monthrange(year, month)[1])
+    return date(year, month, day)
