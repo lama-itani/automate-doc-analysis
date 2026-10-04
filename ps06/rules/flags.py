@@ -22,7 +22,12 @@ from __future__ import annotations
 from datetime import date
 from typing import Iterable, Optional
 
-from ps06.rules.normalize import fold_doc_number, fold_name, names_fuzzy_match, years_between
+from ps06.rules.normalize import (
+    fold_doc_number,
+    fold_nationality,
+    names_fuzzy_match,
+    years_between,
+)
 from ps06.rules.rules_config import GapBand
 
 
@@ -35,14 +40,18 @@ def document_incomplete(missing_fields: tuple[str, ...]) -> bool:
     return bool(missing_fields)
 
 
-def documento_vencido(fecha_vencimiento: Optional[date], evaluation_date: date) -> bool:
+def documento_vencido(fecha_vencimiento: Optional[date], reference_date: date) -> bool:
     """``DOCUMENTO_VENCIDO``: an identification's expiry date has passed.
 
     Definition per session-10 scoping decision #2: ``Fecha de vencimiento`` <
-    the case's evaluation date. An absent expiry date is not evidence of
-    expiry (never fabricate a flag from missing data).
+    ``reference_date``. An absent expiry date is not evidence of expiry
+    (never fabricate a flag from missing data). ``reference_date`` is the
+    caller's choice of what "has passed" means — the case's application date
+    plus a validity buffer when available, falling back to the run's
+    evaluation date otherwise (see ``semaphore.evaluate_document``) — this
+    function only compares, it doesn't decide what the reference is.
     """
-    return fecha_vencimiento is not None and fecha_vencimiento < evaluation_date
+    return fecha_vencimiento is not None and fecha_vencimiento < reference_date
 
 
 def nombre_ambiguo(distinct_candidate_count: int) -> bool:
@@ -85,11 +94,18 @@ def documento_cruzado(names: Iterable[Optional[str]]) -> bool:
     """``DOCUMENTO_CRUZADO``: one document number is assigned to two different names.
 
     Mirror of :func:`id_inconsistente` in the other direction: given every
-    name recorded against what's presumed to be a single document number, more
-    than one distinct folded name means the number is cross-assigned.
+    name recorded against what's presumed to be a single document number, any
+    pair that fails :func:`ps06.rules.normalize.names_fuzzy_match` means the
+    number is cross-assigned — same fuzzy-match tolerance as
+    :func:`nombre_inconsistente`, since OCR/VLM noise (field-order swaps,
+    missing middle names) is not evidence of a real cross-assignment.
     """
-    folded = {fold_name(n) for n in names if n}
-    return len(folded) > 1
+    present = [n for n in names if n]
+    for i, a in enumerate(present):
+        for b in present[i + 1 :]:
+            if not names_fuzzy_match(a, b):
+                return True
+    return False
 
 
 def fecha_conflicto(birth_dates: Iterable[Optional[date]]) -> bool:
@@ -106,11 +122,12 @@ def fecha_conflicto(birth_dates: Iterable[Optional[date]]) -> bool:
 def nacionalidad_inconsistente(nationalities: Iterable[Optional[str]]) -> bool:
     """``NACIONALIDAD_INCONSISTENTE``: stated nationality differs across documents.
 
-    Reuses :func:`ps06.rules.normalize.fold_name` for its case/accent/
-    whitespace folding — nationality strings need the same normalization as
-    names, not a dedicated helper.
+    Uses :func:`ps06.rules.normalize.fold_nationality`, which resolves an ISO
+    code (e.g. ``ESP``) to its Spanish adjective (``Española``) before the
+    usual case/accent/whitespace folding — a code and its spelled-out
+    equivalent are the same nationality, not a conflict.
     """
-    folded = {fold_name(n) for n in nationalities if n}
+    folded = {fold_nationality(n) for n in nationalities if n}
     return len(folded) > 1
 
 

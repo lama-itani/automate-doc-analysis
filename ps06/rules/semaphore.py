@@ -35,7 +35,7 @@ from pydantic import BaseModel, ConfigDict
 from ps06.classification.classifier import DocumentType
 from ps06.rules import flags
 from ps06.rules.lineage import LineageResult
-from ps06.rules.normalize import parse_date
+from ps06.rules.normalize import add_months, parse_date
 from ps06.rules.rules_config import RulesConfig
 from ps06.rules.schemas import CanonicalDocument, CaseBundle, Generation
 
@@ -89,19 +89,28 @@ class SemaphoreDecision(BaseModel):
     missing_documents: tuple[str, ...] = ()
 
 
-def evaluate_document(doc: CanonicalDocument, evaluation_date: date) -> DocumentEvaluation:
+def evaluate_document(
+    doc: CanonicalDocument,
+    evaluation_date: date,
+    vencimiento_reference_date: Optional[date] = None,
+) -> DocumentEvaluation:
     """Per-document-only flags: ``DOCUMENT_INCOMPLETE`` and ``DOCUMENTO_VENCIDO``.
 
-    ``DOCUMENTO_VENCIDO`` is always ``False`` today because ``identidad`` is
-    not yet populated by the adapter (step 4) -- this never crashes on that
-    absence, it simply has no expiry date to compare.
+    ``vencimiento_reference_date``, when given, is compared against instead
+    of ``evaluation_date`` for ``DOCUMENTO_VENCIDO`` -- the case's application
+    date plus a validity buffer (``evaluate_semaphore``), so expiry is judged
+    against *when the applicant actually applied*, not against whatever day
+    the pipeline happens to run. Falls back to ``evaluation_date`` when
+    absent (e.g. no application document, or an unparseable
+    ``fecha_presentacion``) rather than skipping the check.
     """
     hit_flags: list[str] = []
     if flags.document_incomplete(doc.missing_fields):
         hit_flags.append("DOCUMENT_INCOMPLETE")
 
     fecha_vencimiento = parse_date(doc.identidad.fecha_vencimiento) if doc.identidad else None
-    if flags.documento_vencido(fecha_vencimiento, evaluation_date):
+    reference_date = vencimiento_reference_date if vencimiento_reference_date is not None else evaluation_date
+    if flags.documento_vencido(fecha_vencimiento, reference_date):
         hit_flags.append("DOCUMENTO_VENCIDO")
 
     return DocumentEvaluation(
@@ -169,7 +178,17 @@ def evaluate_semaphore(
     expected_document_checks = check_expected_documents(bundle, config, lineage)
     missing_documents = tuple(c.label for c in expected_document_checks if not c.present)
 
-    document_evaluations = tuple(evaluate_document(doc, evaluation_date) for doc in bundle.documents)
+    application = bundle.application
+    fecha_presentacion = parse_date(application.solicitud.fecha_presentacion) if application and application.solicitud else None
+    vencimiento_reference_date = (
+        add_months(fecha_presentacion, config.document_validity_months_past_application)
+        if fecha_presentacion is not None
+        else None
+    )
+
+    document_evaluations = tuple(
+        evaluate_document(doc, evaluation_date, vencimiento_reference_date) for doc in bundle.documents
+    )
     per_doc_flags: set[str] = set()
     for evaluation in document_evaluations:
         per_doc_flags.update(evaluation.flags)

@@ -6,9 +6,11 @@ from datetime import date
 
 from ps06.rules.normalize import (
     dates_within_years,
+    add_months,
     doc_numbers_match,
     fold_doc_number,
     fold_name,
+    fold_nationality,
     names_fuzzy_match,
     names_match,
     nfkc,
@@ -85,6 +87,14 @@ def test_fold_name_empty_and_none_return_empty_string():
     assert fold_name("") == ""
 
 
+def test_fold_nationality_resolves_iso_code_to_name():
+    assert fold_nationality("ESP") == fold_nationality("Española")
+
+
+def test_fold_nationality_passes_through_unmapped_values():
+    assert fold_nationality("Boliviana") == fold_name("Boliviana")
+
+
 def test_names_match_requires_nonempty_and_equal():
     assert names_match("Ana García", "ana garcia")
     assert not names_match(None, None)
@@ -132,6 +142,22 @@ def test_parse_date_supports_slash_and_iso_and_dash_and_dot_formats():
     assert parse_date("01.05.1990") == date(1990, 5, 1)
 
 
+def test_parse_date_supports_space_separated_format():
+    assert parse_date("05 07 2026") == date(2026, 7, 5)
+
+
+def test_parse_date_supports_spanish_month_abbreviation_with_slashes():
+    assert parse_date("30/Nov/2015") == date(2015, 11, 30)
+
+
+def test_parse_date_supports_spanish_de_date_words():
+    assert parse_date("30 de noviembre de 2015") == date(2015, 11, 30)
+
+
+def test_parse_date_supports_fully_spelled_out_spanish_date():
+    assert parse_date("27 SEPTIEMBRE MIL NOVECIENTOS SESENTA") == date(1960, 9, 27)
+
+
 def test_parse_date_returns_none_for_unparseable_or_absent():
     assert parse_date(None) is None
     assert parse_date("") is None
@@ -166,3 +192,23 @@ def test_dates_within_years_none_never_matches():
 def test_dates_within_years_order_independent():
     a, b = date(1990, 1, 1), date(1988, 6, 1)
     assert dates_within_years(a, b, tolerance_years=2) == dates_within_years(b, a, tolerance_years=2)
+
+
+# --- Month arithmetic ------------------------------------------------------
+
+
+def test_add_months_within_same_year():
+    assert add_months(date(2025, 10, 1), 6) == date(2026, 4, 1)
+
+
+def test_add_months_rolls_over_year_boundary():
+    assert add_months(date(2025, 10, 15), 3) == date(2026, 1, 15)
+
+
+def test_add_months_clamps_day_to_shorter_month():
+    assert add_months(date(2025, 1, 31), 1) == date(2025, 2, 28)
+    assert add_months(date(2024, 1, 31), 1) == date(2024, 2, 29)
+
+
+def test_add_months_zero_is_identity():
+    assert add_months(date(2025, 10, 4), 0) == date(2025, 10, 4)

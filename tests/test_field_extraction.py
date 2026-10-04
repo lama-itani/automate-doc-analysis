@@ -155,6 +155,14 @@ def test_non_json_response_yields_empty_fields():
     assert result.raw_response == "I cannot extract this document's fields."
 
 
+def test_fenced_json_response_is_parsed():
+    payload = {"Tipo de ID": "Pasaporte", "Número de ID": "XDD882743"}
+    client = FakeFieldExtractionClient(response=f"```json\n{json.dumps(payload)}\n```")
+    result = extract_fields("text", DocumentType.ID_DOCUMENT, _config(), client)
+
+    assert result.fields == {"tipo_id": "Pasaporte", "numero_id": "XDD882743"}
+
+
 def test_json_array_response_yields_empty_fields():
     client = FakeFieldExtractionClient(response=json.dumps(["Pasaporte", "XDD882743"]))
     result = extract_fields("text", DocumentType.ID_DOCUMENT, _config(), client)

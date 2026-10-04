@@ -101,6 +101,10 @@ def test_documento_cruzado_true_when_two_distinct_names():
     assert documento_cruzado(["Ana García", "Maria López"]) is True
 
 
+def test_documento_cruzado_false_when_fuzzy_match_subset_tokens():
+    assert documento_cruzado(["Ricardo Minaya Sainz", "Minaya Sainz"]) is False
+
+
 # --- FECHA_CONFLICTO ------------------------------------------------------
 
 
@@ -125,6 +129,10 @@ def test_nacionalidad_inconsistente_false_when_folded_equal():
 
 def test_nacionalidad_inconsistente_true_when_differ():
     assert nacionalidad_inconsistente(["Boliviana", "Española"]) is True
+
+
+def test_nacionalidad_inconsistente_false_when_code_matches_name():
+    assert nacionalidad_inconsistente(["ESP", "Española"]) is False
 
 
 # --- BRECHA_GENERACIONAL ------------------------------------------------------

@@ -119,6 +119,13 @@ class RulesConfig(BaseModel):
 
     gap_bands: GapBandsConfig = Field(default_factory=GapBandsConfig)
     entity_resolution: EntityResolutionConfig = Field(default_factory=EntityResolutionConfig)
+    #: ``DOCUMENTO_VENCIDO`` is checked against the application's own
+    #: ``fecha_presentacion`` plus this many months, not the run's
+    #: ``evaluation_date`` — a passport must still be valid this far past
+    #: *when the applicant actually applied*, not past whatever day the
+    #: pipeline happens to run. Falls back to ``evaluation_date`` only when
+    #: ``fecha_presentacion`` is absent/unparseable (semaphore.py).
+    document_validity_months_past_application: int = 6
     expected_documents: tuple[ExpectedDocument, ...] = Field(
         default_factory=lambda: (
             ExpectedDocument(
