@@ -156,6 +156,37 @@ def fake_classification_client():
     return FakeClassificationClient()
 
 
+class FakeFieldExtractionClient:
+    """Test double for ReauthHTTPClient.chat_completion, for field extraction.
+
+    Same shape as FakeClassificationClient — text-only calls, one scripted
+    response. Field-extraction calls are distinguished from classification
+    calls by the caller choosing which fake to inject (job-level fakes that
+    need to serve both call types route by prompt content instead, as
+    FakeOpenAIClient does).
+    """
+
+    def __init__(self, response: str = "{}") -> None:
+        self.response = response
+        self.calls: list[dict] = []
+
+    def chat_completion(self, *, messages, max_tokens, temperature=0.0, extra_body=None):
+        prompt = messages[0]["content"][0]["text"]
+        call = {
+            "prompt": prompt,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "extra_body": extra_body,
+        }
+        self.calls.append(call)
+        return self.response
+
+
+@pytest.fixture
+def fake_field_extraction_client():
+    return FakeFieldExtractionClient()
+
+
 class _FakeMsg:
     def __init__(self, content: str) -> None:
         self.content = content
@@ -173,8 +204,11 @@ class _FakeCompletion:
 
 class _FakeCompletions:
     """Returns ``ocr_text`` for an OCR/orientation-style call (image block
-    present) and ``classification_text`` for a classification call (text-only)
-    — distinguished structurally, same convention as FakeClassificationClient.
+    present), ``field_extraction_text`` for a field-extraction call (text-only,
+    "structured-data extractor" instruction phrase present), and
+    ``classification_text`` for a classification call (text-only, everything
+    else) — distinguished structurally, same convention as
+    FakeClassificationClient/FakeFieldExtractionClient.
     """
 
     def __init__(
@@ -182,9 +216,11 @@ class _FakeCompletions:
         ocr_text: str,
         classification_text: str,
         fail_on_call: int | None,
+        field_extraction_text: str = "{}",
     ) -> None:
         self._ocr_text = ocr_text
         self._classification_text = classification_text
+        self._field_extraction_text = field_extraction_text
         self._fail_on_call = fail_on_call
         self.call_count = 0
 
@@ -193,8 +229,14 @@ class _FakeCompletions:
         if self._fail_on_call == self.call_count:
             raise RuntimeError(f"simulated failure on call {self.call_count}")
         messages = kwargs["messages"]
-        has_image = len(messages[0]["content"]) > 1
-        content = self._ocr_text if has_image else self._classification_text
+        content_blocks = messages[0]["content"]
+        has_image = len(content_blocks) > 1
+        if has_image:
+            content = self._ocr_text
+        elif "structured-data extractor" in content_blocks[0]["text"]:
+            content = self._field_extraction_text
+        else:
+            content = self._classification_text
         return _FakeCompletion(content)
 
 
@@ -224,10 +266,13 @@ class FakeOpenAIClient:
         ocr_text: str = "unused",
         classification_text: str = "OTHER",
         fail_on_call: int | None = None,
+        field_extraction_text: str = "{}",
     ) -> None:
         self.base_url = base_url
         self.api_key = api_key
-        self.chat = _FakeChat(_FakeCompletions(ocr_text, classification_text, fail_on_call))
+        self.chat = _FakeChat(
+            _FakeCompletions(ocr_text, classification_text, fail_on_call, field_extraction_text)
+        )
 
 
 @pytest.fixture

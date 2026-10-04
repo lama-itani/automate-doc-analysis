@@ -113,14 +113,23 @@ def evaluate_document(doc: CanonicalDocument, evaluation_date: date) -> Document
 
 
 def check_expected_documents(
-    bundle: CaseBundle, config: RulesConfig
+    bundle: CaseBundle, config: RulesConfig, lineage: Optional[LineageResult] = None
 ) -> tuple[ExpectedDocumentCheck, ...]:
-    """Match each of ``config.expected_documents`` against the case bundle."""
+    """Match each of ``config.expected_documents`` against the case bundle.
+
+    ``lineage``, when given, also counts a birth cert inferred (not tagged)
+    as the expected generation.
+    """
     checks: list[ExpectedDocumentCheck] = []
     for expected in config.expected_documents:
         candidates = bundle.by_type(expected.document_type)
         if expected.generation is not None:
-            candidates = tuple(d for d in candidates if d.generation == expected.generation)
+            candidates = tuple(
+                d
+                for d in candidates
+                if d.generation == expected.generation
+                or (lineage is not None and lineage.inferred_generations.get(d.document_id) == expected.generation)
+            )
         checks.append(
             ExpectedDocumentCheck(
                 label=expected.label,
@@ -157,7 +166,7 @@ def evaluate_semaphore(
     evaluation_date: date,
 ) -> SemaphoreDecision:
     """Combine per-document checks + lineage flags into a final decision."""
-    expected_document_checks = check_expected_documents(bundle, config)
+    expected_document_checks = check_expected_documents(bundle, config, lineage)
     missing_documents = tuple(c.label for c in expected_document_checks if not c.present)
 
     document_evaluations = tuple(evaluate_document(doc, evaluation_date) for doc in bundle.documents)

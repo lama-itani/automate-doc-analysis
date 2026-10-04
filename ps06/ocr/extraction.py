@@ -36,6 +36,7 @@ from PIL import Image
 from pydantic import BaseModel, ConfigDict, Field
 
 from ps06.classification.classifier import ClassificationConfig
+from ps06.classification.field_extraction import FieldExtractionConfig
 
 logger = logging.getLogger(__name__)
 
@@ -106,6 +107,10 @@ class OcrJobConfig(BaseModel):
     ``endpoint_url``/``model_name`` build — nested here rather than as a
     separate top-level job parameter to keep "the OCR job's configuration"
     as one object passed around by callers (CLI, orchestrator).
+
+    ``field_extraction`` (Fix Plan item 4) configures the structured-field
+    extraction step ``job.py`` runs after classification, for the same
+    client-reuse reason.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -120,6 +125,7 @@ class OcrJobConfig(BaseModel):
     min_text_layer_chars: int = 60
     enable_orientation_correction: bool = False
     classification: ClassificationConfig = Field(default_factory=ClassificationConfig)
+    field_extraction: FieldExtractionConfig = Field(default_factory=FieldExtractionConfig)
 
 
 # ---------------------------------------------------------------------------

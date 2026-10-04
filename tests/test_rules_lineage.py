@@ -180,6 +180,8 @@ def test_duplicate_disagreeing_certs_raise_conflict_not_crash():
 
 
 def test_untagged_birth_cert_contributes_nothing():
+    # No application/ID exists here, so no G1 person ever resolves to match
+    # against -- not because untagged certs are categorically excluded.
     untagged = _doc(
         "cert_untagged",
         DocumentType.BIRTH_CERT,
@@ -190,6 +192,119 @@ def test_untagged_birth_cert_contributes_nothing():
     assert result.g1.person is None
     assert result.g2.person is None
     assert result.g3.person is None
+
+
+# --- untagged birth cert resolved by subject-matching an applicant --------
+
+
+def test_untagged_g1_cert_absorbed_via_subject_match():
+    app = _doc(
+        "app",
+        DocumentType.APPLICATION,
+        solicitud=SolicitudData(nombre_solicitante="Ana", apellido_padre="Garcia", numero_id="1"),
+    )
+    g1_id = _doc(
+        "id1",
+        DocumentType.ID_DOCUMENT,
+        identidad=IdData(nombres="Ana", apellidos="Garcia", numero_id="1", fecha_nacimiento="01/01/1990"),
+    )
+    untagged = _doc(
+        "cert_untagged",
+        DocumentType.BIRTH_CERT,
+        generation=None,
+        certificado=CertificadoData(nombre="Ana Garcia", fecha_nacimiento="01/01/1990"),
+    )
+    result = resolve_lineage(_bundle(app, g1_id, untagged), CONFIG)
+    assert result.inferred_generations["cert_untagged"] == "G1"
+    assert "cert_untagged" in result.g1.corroborating_document_ids
+
+
+# --- untagged birth cert resolved by subject-matching a tagged G1's progenitor
+
+
+def test_untagged_g2_cert_absorbed_via_progenitor_match():
+    # Own-subject cert records never carry a doc number, so a resolved parent
+    # person needs a DOB (from its own tagged cert here) for name+DOB to hit
+    # min_criteria; a g1_cert's progenitor-only record has no DOB to merge on.
+    g1_cert = _doc(
+        "cert_g1", DocumentType.BIRTH_CERT, generation="G1",
+        certificado=CertificadoData(nombre="Ana Garcia", fecha_nacimiento="01/01/1990"),
+    )
+    g2_cert = _doc(
+        "cert_g2",
+        DocumentType.BIRTH_CERT,
+        generation="G2",
+        certificado=CertificadoData(nombre="Pedro Ruiz", fecha_nacimiento="01/01/1960"),
+    )
+    untagged_g2 = _doc(
+        "cert_untagged_g2",
+        DocumentType.BIRTH_CERT,
+        generation=None,
+        certificado=CertificadoData(nombre="Pedro Ruiz", fecha_nacimiento="01/01/1960"),
+    )
+    result = resolve_lineage(_bundle(g1_cert, g2_cert, untagged_g2), CONFIG)
+    assert result.inferred_generations["cert_untagged_g2"] == "G2"
+    assert "cert_untagged_g2" in result.g2.corroborating_document_ids
+
+
+# --- cascading inference: untagged G1 unlocks an untagged G2 next pass ----
+
+
+def test_untagged_g1_cascades_into_g2_progenitor_pool():
+    # Pass 1 infers cert_untagged_g1 as G1 via subject match; pass 2 then
+    # rebuilds the G2 pool from its now-included progenitor1 fields.
+    app = _doc(
+        "app",
+        DocumentType.APPLICATION,
+        solicitud=SolicitudData(nombre_solicitante="Ana", apellido_padre="Garcia", numero_id="1"),
+    )
+    g1_id = _doc(
+        "id1",
+        DocumentType.ID_DOCUMENT,
+        identidad=IdData(nombres="Ana", apellidos="Garcia", numero_id="1", fecha_nacimiento="01/01/1990"),
+    )
+    untagged_g1 = _doc(
+        "cert_untagged_g1",
+        DocumentType.BIRTH_CERT,
+        generation=None,
+        certificado=CertificadoData(
+            nombre="Ana Garcia",
+            fecha_nacimiento="01/01/1990",
+            progenitor1_nombre="Pedro Ruiz",
+            progenitor1_num_doc="P1",
+        ),
+    )
+    result = resolve_lineage(_bundle(app, g1_id, untagged_g1), CONFIG)
+    assert result.inferred_generations["cert_untagged_g1"] == "G1"
+    assert result.g2.person is not None
+    assert result.g2.person.nombre == "Pedro Ruiz"
+
+
+# --- untagged cert not absorbed when parent generation is ambiguous -------
+
+
+def test_untagged_cert_not_absorbed_when_parent_ambiguous():
+    cert_a = _doc(
+        "cert_a",
+        DocumentType.BIRTH_CERT,
+        generation="G1",
+        certificado=CertificadoData(nombre="Ana Garcia", fecha_nacimiento="01/01/1990"),
+    )
+    cert_b = _doc(
+        "cert_b",
+        DocumentType.BIRTH_CERT,
+        generation="G1",
+        certificado=CertificadoData(nombre="Maria Lopez", fecha_nacimiento="01/01/1950"),
+    )
+    untagged = _doc(
+        "cert_untagged",
+        DocumentType.BIRTH_CERT,
+        generation=None,
+        certificado=CertificadoData(nombre="Ana Garcia", fecha_nacimiento="01/01/1990"),
+    )
+    result = resolve_lineage(_bundle(cert_a, cert_b, untagged), CONFIG)
+    assert result.g1.ambiguous is True
+    assert "cert_untagged" not in result.inferred_generations
 
 
 # --- G2 resolved from a single progenitor-named record, no matching doc ---

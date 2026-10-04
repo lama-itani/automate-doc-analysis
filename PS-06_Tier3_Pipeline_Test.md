@@ -149,3 +149,26 @@ correctness beyond what one folder's document set can exercise.
 Pure runbook. If classification or rules output looks wrong on real documents,
 that's a follow-up finding (prompt tuning / rules scoping), not something to
 fix inline during the test.
+
+## Re-run (Fix-plan item 7)
+Same procedure, same folder/endpoint. Deltas only:
+
+- **Step 1:** confirm the commit with fix-plan items 2-5 (Anexo field mapping,
+  firma detection, structured field extraction, generation resolution) is
+  present (`git log --oneline -1`), not just `--folder`/`--evaluate-rules`.
+- **Step 3:** fresh `pipeline_test2.db` — don't reuse the first run's DB.
+- **Step 4:** case id `folder_test2` (distinguish from the first run).
+- **Step 6, check against the first run's findings** (`PS-06_Tier3_Results.md`):
+  - s1: G1/G2 cert rows now **Presente** (were Faltante) — finding #1 fixed.
+  - s3: G1/G2 lineage rows resolved (were "No determinado") — same.
+  - Anexo 4 fields populated in s1/s2 (was all-missing) — finding #2 fixed.
+  - `campos_faltantes` on ID/certs reflects real extracted values, not
+    blanket-missing — finding #3 fixed.
+  - `firma` reflects the page-2 "SIGN" token.
+  - `estado` may differ from AMARILLO; record whatever it is + `justificacion`.
+    No G3 cert in this folder, so AMARILLO from the genuinely missing G3 is
+    still a correct outcome, not a defect (finding #4).
+- **Output:** write `PS-06_Tier3_Results_2.md` in the same format as the
+  original — only list genuinely new findings; confirm findings 1-3 resolved
+  rather than re-describing them.
+- **Cleanup:** delete `pipeline_test2.db`/`-wal`/`-shm` after review.

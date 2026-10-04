@@ -16,6 +16,10 @@ persisted before M-2.5 existed — every job invocation from M-2.5 onward always
 populates it. No verdict/rules fields beyond classification — M-4's rules
 engine is still out of scope here (see the "M-2 session 2" Progress Log entry
 for the original resolved scope decision).
+
+``field_extraction`` (:class:`ps06.classification.field_extraction.FieldExtractionResult`,
+Fix Plan item 4) is optional for the same backward-compatibility reason —
+rows persisted before this feature existed have no such field.
 """
 
 from __future__ import annotations
@@ -26,6 +30,7 @@ from pathlib import Path
 from pydantic import BaseModel, ConfigDict
 
 from ps06.classification.classifier import ClassificationResult
+from ps06.classification.field_extraction import FieldExtractionResult
 from ps06.ocr.extraction import ExtractionResult
 from ps06.status.store import StatusStore
 
@@ -52,6 +57,7 @@ class OcrResult(BaseModel):
     source_file: str  # basename only, not the full local path
     extraction: ExtractionResult
     classification: ClassificationResult | None = None
+    field_extraction: FieldExtractionResult | None = None
     processing_seconds: float
     model_name: str
     extracted_at: str  # ISO-8601 UTC
@@ -67,6 +73,7 @@ class OcrResult(BaseModel):
         processing_seconds: float,
         model_name: str,
         classification: ClassificationResult | None = None,
+        field_extraction: FieldExtractionResult | None = None,
     ) -> OcrResult:
         """Construct an ``OcrResult``, deriving ``source_file`` and ``extracted_at``."""
         return cls(
@@ -75,6 +82,7 @@ class OcrResult(BaseModel):
             source_file=Path(file_path).name,
             extraction=extraction,
             classification=classification,
+            field_extraction=field_extraction,
             processing_seconds=processing_seconds,
             model_name=model_name,
             extracted_at=_utcnow_iso(),

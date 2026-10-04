@@ -88,6 +88,13 @@ class SolicitudData(BaseModel):
     fecha_presentacion: Optional[str] = None
     op_vecindad: Optional[str] = None
     firma: bool = False
+    #: Only present on Anexo III/IV (registro civil tomo/folio + date the
+    #: option right was exercised, plus the civil registry of inscription);
+    #: Anexo I has no equivalent fields.
+    tomo: Optional[str] = None
+    folio: Optional[str] = None
+    fecha_ejercicio_opcion: Optional[str] = None
+    registro_civil_inscripcion: Optional[str] = None
 
 
 #: canonical attribute -> exact Spanish label in the AEAD SOLICITUD schema.
@@ -109,6 +116,10 @@ SOLICITUD_SOURCE_LABELS: dict[str, str] = {
     "fecha_presentacion": "Fecha de presentación",
     "op_vecindad": "Op. Vecindad",
     "firma": "Firma",
+    "tomo": "Tomo",
+    "folio": "Folio",
+    "fecha_ejercicio_opcion": "Fecha de ejercicio de la opción",
+    "registro_civil_inscripcion": "Inscrito/a en el Registro Civil de",
 }
 
 

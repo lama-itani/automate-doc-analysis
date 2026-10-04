@@ -35,12 +35,13 @@ class _FakeCompletion:
 
 
 class _FakeCompletions:
-    """Returns ``ocr_text`` for the (only, if fast-path) OCR-style call and
-    ``classification_text`` for the classification call — distinguished by
-    call order, since the text-layer fast path fixtures make classification
-    the only ``.create()`` call, while VLM-path fixtures would make it the
-    second. Tests that need more granular control raise on a specific call
-    index via ``fail_on_call``.
+    """Returns ``ocr_text`` for the (only, if fast-path) OCR-style call,
+    ``field_extraction_text`` for a field-extraction call (text-only,
+    "structured-data extractor" instruction phrase present), and
+    ``classification_text`` for the classification call (text-only,
+    everything else) — distinguished structurally, same convention as
+    ``conftest.py``'s shared fakes. Tests that need more granular control
+    raise on a specific call index via ``fail_on_call``.
     """
 
     def __init__(
@@ -48,9 +49,11 @@ class _FakeCompletions:
         ocr_text: str,
         classification_text: str = "OTHER",
         fail_on_call: int | None = None,
+        field_extraction_text: str = "{}",
     ) -> None:
         self._ocr_text = ocr_text
         self._classification_text = classification_text
+        self._field_extraction_text = field_extraction_text
         self._fail_on_call = fail_on_call
         self.call_count = 0
 
@@ -59,8 +62,14 @@ class _FakeCompletions:
         if self._fail_on_call == self.call_count:
             raise RuntimeError(f"simulated failure on call {self.call_count}")
         messages = kwargs["messages"]
-        has_image = len(messages[0]["content"]) > 1
-        content = self._ocr_text if has_image else self._classification_text
+        content_blocks = messages[0]["content"]
+        has_image = len(content_blocks) > 1
+        if has_image:
+            content = self._ocr_text
+        elif "structured-data extractor" in content_blocks[0]["text"]:
+            content = self._field_extraction_text
+        else:
+            content = self._classification_text
         return _FakeCompletion(content)
 
 
@@ -82,11 +91,12 @@ class _FakeOpenAIClient:
         ocr_text: str = "unused",
         classification_text: str = "OTHER",
         fail_on_call: int | None = None,
+        field_extraction_text: str = "{}",
     ) -> None:
         self.base_url = base_url
         self.api_key = api_key
         self.chat = _FakeChat(
-            _FakeCompletions(ocr_text, classification_text, fail_on_call)
+            _FakeCompletions(ocr_text, classification_text, fail_on_call, field_extraction_text)
         )
 
 
@@ -146,6 +156,71 @@ class TestJobRun:
         assert payload["case_id"] == "case-1"
         assert payload["extraction"]["file_type"] == "pdf"
         assert payload["classification"]["document_type"] == "APPLICATION"
+        # APPLICATION short-circuits field extraction — no fields, no LLM call.
+        assert result.field_extraction is not None
+        assert result.field_extraction.fields == {}
+        assert payload["field_extraction"]["fields"] == {}
+
+    def test_id_document_classification_runs_field_extraction_and_persists_fields(
+        self, store, pdf_with_text_layer
+    ):
+        store.register_document("case-1", "doc-1")
+
+        result = job.run(
+            case_id="case-1",
+            document_id="doc-1",
+            file_path=str(pdf_with_text_layer),
+            config=_config(),
+            store=store,
+            auth=FakeAuthProvider(["tok1"]),
+            client_factory=_client_factory_with(
+                classification_text="ID_DOCUMENT",
+                field_extraction_text=json.dumps({"Nombres": "Ricardo"}),
+            ),
+        )
+
+        assert result.classification.document_type.value == "ID_DOCUMENT"
+        assert result.field_extraction is not None
+        assert result.field_extraction.fields == {"nombres": "Ricardo"}
+
+        row = store.connection.execute(
+            "SELECT * FROM document_extraction WHERE case_id = ? AND document_id = ?;",
+            ("case-1", "doc-1"),
+        ).fetchone()
+        payload = json.loads(row["payload"])
+        assert payload["field_extraction"]["fields"] == {"nombres": "Ricardo"}
+
+    def test_field_extraction_infra_failure_transitions_to_failed_with_error_detail(
+        self, store, pdf_with_text_layer
+    ):
+        store.register_document("case-1", "doc-1")
+
+        with pytest.raises(RuntimeError):
+            job.run(
+                case_id="case-1",
+                document_id="doc-1",
+                file_path=str(pdf_with_text_layer),
+                config=_config(),
+                store=store,
+                auth=FakeAuthProvider(["tok1"]),
+                # Call 1 is classification (text-layer fast path makes no
+                # OCR-image call); call 2 is field extraction, reached only
+                # because classification resolves to ID_DOCUMENT here.
+                client_factory=_client_factory_with(
+                    classification_text="ID_DOCUMENT", fail_on_call=2
+                ),
+            )
+
+        status = store.get_or_raise("case-1", "doc-1")
+        assert status.stage == DocumentStage.FAILED
+        assert status.error_detail
+        assert "RuntimeError" in status.error_detail
+
+        row = store.connection.execute(
+            "SELECT * FROM document_extraction WHERE case_id = ? AND document_id = ?;",
+            ("case-1", "doc-1"),
+        ).fetchone()
+        assert row is None
 
     def test_classification_infra_failure_transitions_to_failed_with_error_detail(
         self, store, pdf_with_text_layer

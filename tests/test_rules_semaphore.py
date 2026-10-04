@@ -154,6 +154,31 @@ def test_check_expected_documents_generation_disambiguates_birth_certs():
     assert by_label["Certificado de Nacimiento Español de origen"].present is False
 
 
+def test_check_expected_documents_counts_inferred_generation_as_present():
+    app = _doc(
+        "app",
+        DocumentType.APPLICATION,
+        solicitud=SolicitudData(nombre_solicitante="Ana", apellido_padre="Garcia", numero_id="1"),
+    )
+    g1_id = _doc(
+        "id1",
+        DocumentType.ID_DOCUMENT,
+        identidad=IdData(nombres="Ana", apellidos="Garcia", numero_id="1", fecha_nacimiento="01/01/1990"),
+    )
+    untagged = _doc(
+        "cert_untagged",
+        DocumentType.BIRTH_CERT,
+        certificado=CertificadoData(nombre="Ana Garcia", fecha_nacimiento="01/01/1990"),
+    )
+    bundle = _bundle(app, g1_id, untagged)
+    lineage = resolve_lineage(bundle, CONFIG)
+    checks = check_expected_documents(bundle, CONFIG, lineage)
+    by_label = {c.label: c for c in checks}
+    entry = by_label["Certificado de Nacimiento del Solicitante"]
+    assert entry.present is True
+    assert "cert_untagged" in entry.matched_document_ids
+
+
 # --- evaluate_semaphore: structural / severity cases -------------------------
 
 
