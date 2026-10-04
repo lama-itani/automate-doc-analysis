@@ -4,10 +4,12 @@ Ties together the pieces built in steps 1-6: mints a fresh token and builds a
 :class:`~ps06.ocr.http_client.ReauthHTTPClient` (per-invocation token
 isolation — the whole reason this build exists), runs
 :func:`ps06.ocr.extraction.extract` followed by
-:func:`ps06.classification.classifier.classify` (reusing the same client — no
-second token mint), wraps both results in an :class:`~ps06.ocr.envelope.OcrResult`,
-persists it to the ``document_extraction`` table, and drives the document's
-status via :class:`~ps06.status.store.StatusStore`.
+:func:`ps06.classification.classifier.classify` followed by
+:func:`ps06.classification.field_extraction.extract_fields` (Fix Plan item 4,
+reusing the same client — no second/third token mint), wraps all three
+results in an :class:`~ps06.ocr.envelope.OcrResult`, persists it to the
+``document_extraction`` table, and drives the document's status via
+:class:`~ps06.status.store.StatusStore`.
 
 Every failure path — extraction error, auth exhaustion, a bug, a persistence
 failure — is caught by one ``except Exception``, always transitions the
@@ -15,9 +17,10 @@ document to :attr:`~ps06.status.states.DocumentStage.FAILED` with a populated
 ``error_detail``, and always re-raises so the process exits non-zero and the
 failure stays visible. No silent failures, per the production-readiness bar
 for this build (see the Build Handoff's "M-2 session 2" Progress Log entry).
-``classify`` itself never raises for an ambiguous/unparseable model response
-(see its docstring) — only genuine infrastructure failures reach this
-``except Exception``, same as an extraction failure.
+``classify`` and ``extract_fields`` themselves never raise for an
+ambiguous/unparseable model response (see their docstrings) — only genuine
+infrastructure failures reach this ``except Exception``, same as an
+extraction failure.
 """
 
 from __future__ import annotations
@@ -30,6 +33,7 @@ from typing import Any
 import openai
 
 from ps06.classification.classifier import classify
+from ps06.classification.field_extraction import extract_fields
 from ps06.ocr.auth import AuthProvider
 from ps06.ocr.envelope import OcrResult
 from ps06.ocr.extraction import OcrJobConfig, extract
@@ -72,6 +76,12 @@ def run(
         )
         extraction = extract(file_path, config, client)
         classification = classify(extraction.extracted_text, config.classification, client)
+        field_extraction = extract_fields(
+            extraction.extracted_text,
+            classification.document_type,
+            config.field_extraction,
+            client,
+        )
         processing_seconds = time.monotonic() - start
         result = OcrResult.build(
             case_id=case_id,
@@ -79,6 +89,7 @@ def run(
             file_path=file_path,
             extraction=extraction,
             classification=classification,
+            field_extraction=field_extraction,
             processing_seconds=processing_seconds,
             model_name=config.model_name,
         )

@@ -22,5 +22,6 @@ htmlcov/
 # OS
 .DS_Store
 
-#markdown
+#markdown and pdf files
 *.md
+*.pdf

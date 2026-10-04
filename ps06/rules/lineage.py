@@ -35,7 +35,7 @@ from __future__ import annotations
 from datetime import date
 from typing import Iterable, Optional
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from ps06.rules import flags
 from ps06.rules.normalize import (
@@ -133,6 +133,8 @@ class LineageResult(BaseModel):
     #: Flags inherently spanning roles rather than belonging to one — today
     #: only ``DOCUMENTO_CRUZADO`` (one document number claimed by >1 name).
     cross_case_flags: tuple[str, ...] = ()
+    #: document_id -> generation for untagged certs resolved by subject match.
+    inferred_generations: dict[str, Generation] = Field(default_factory=dict)
 
     @property
     def roles(self) -> tuple[RoleResolution, RoleResolution, RoleResolution]:
@@ -247,6 +249,19 @@ def _records_from_certificado(
     )
 
 
+def _candidate_from_person(person: Person) -> _CandidateRecord:
+    """Adapt a resolved ``Person`` so ``_match_score`` can compare it to a record."""
+    return _CandidateRecord(
+        name=person.nombre,
+        fecha_nacimiento=person.fecha_nacimiento,
+        num_documento=person.num_documento,
+        nacionalidad=person.nacionalidad,
+        sexo=person.sexo,
+        lugar_nacimiento=person.lugar_nacimiento,
+        source_document_id="",
+    )
+
+
 class _UnionFind:
     """Minimal union-find over integer indices, for match-graph components."""
 
@@ -276,6 +291,38 @@ def _match_score(
     if doc_numbers_match(a.num_documento, b.num_documento):
         score += 1
     return score
+
+
+def _infer_untagged_generations(
+    bundle: CaseBundle,
+    g1: RoleResolution,
+    g2: RoleResolution,
+    g3: RoleResolution,
+    er_config: EntityResolutionConfig,
+) -> dict[str, Generation]:
+    """Map untagged birth certs to a generation by matching their subject.
+
+    First-match-wins across G1->G2->G3: a cert's subject is one specific
+    person, never two generations at once.
+    """
+    inferred: dict[str, Generation] = {}
+    for doc in bundle.birth_certificates:
+        if doc.generation is not None:
+            continue
+        (record,) = _records_from_certificado(doc) or (None,)
+        if record is None or record.is_empty:
+            continue
+        for generation, role in (("G1", g1), ("G2", g2), ("G3", g3)):
+            if role.person is None or role.ambiguous:
+                continue
+            if _match_score(
+                record,
+                _candidate_from_person(role.person),
+                dob_tolerance_years=er_config.dob_tolerance_years,
+            ) >= er_config.min_criteria:
+                inferred[doc.document_id] = generation
+                break
+    return inferred
 
 
 def _merge_person(
@@ -366,11 +413,13 @@ def _resolve_role(
     )
 
 
-def _certificados_for_generation(
-    bundle: CaseBundle, generation: Generation
+def _certs_for_generation(
+    bundle: CaseBundle, generation: Generation, inferred: dict[str, Generation]
 ) -> tuple[CanonicalDocument, ...]:
     return tuple(
-        doc for doc in bundle.birth_certificates if doc.generation == generation
+        doc
+        for doc in bundle.birth_certificates
+        if doc.generation == generation or inferred.get(doc.document_id) == generation
     )
 
 
@@ -443,25 +492,33 @@ def resolve_lineage(bundle: CaseBundle, config: RulesConfig) -> LineageResult:
     """Resolve a case's G1/G2/G3 roles and their person-level conflict flags."""
     er_config = config.entity_resolution
 
-    g1_certs = _certificados_for_generation(bundle, "G1")
-    g1_pool: list[_CandidateRecord] = []
-    if bundle.application is not None:
-        g1_pool.extend(_records_from_solicitud(bundle.application))
-    for doc in bundle.identity_documents:
-        g1_pool.extend(_records_from_id(doc))
-    for cert in g1_certs:
-        g1_pool.extend(_records_from_certificado(cert))
-    g1 = _resolve_role("G1", g1_pool, er_config)
+    inferred: dict[str, Generation] = {}
+    # Bounded at 3: only 3 generations, so at most one newly unlocks per pass.
+    for _ in range(3):
+        g1_certs = _certs_for_generation(bundle, "G1", inferred)
+        g1_pool: list[_CandidateRecord] = []
+        if bundle.application is not None:
+            g1_pool.extend(_records_from_solicitud(bundle.application))
+        for doc in bundle.identity_documents:
+            g1_pool.extend(_records_from_id(doc))
+        for cert in g1_certs:
+            g1_pool.extend(_records_from_certificado(cert))
+        g1 = _resolve_role("G1", g1_pool, er_config)
 
-    g2_certs = _certificados_for_generation(bundle, "G2")
-    g2_pool = _child_pool(g1, g1_certs, g2_certs)
-    g2 = _resolve_role("G2", g2_pool, er_config)
-    g2 = _apply_generational_gap_check(g1, g2, config.gap_bands.hard)
+        g2_certs = _certs_for_generation(bundle, "G2", inferred)
+        g2_pool = _child_pool(g1, g1_certs, g2_certs)
+        g2 = _resolve_role("G2", g2_pool, er_config)
+        g2 = _apply_generational_gap_check(g1, g2, config.gap_bands.hard)
 
-    g3_certs = _certificados_for_generation(bundle, "G3")
-    g3_pool = _child_pool(g2, g2_certs, g3_certs)
-    g3 = _resolve_role("G3", g3_pool, er_config)
-    g3 = _apply_generational_gap_check(g2, g3, config.gap_bands.hard)
+        g3_certs = _certs_for_generation(bundle, "G3", inferred)
+        g3_pool = _child_pool(g2, g2_certs, g3_certs)
+        g3 = _resolve_role("G3", g3_pool, er_config)
+        g3 = _apply_generational_gap_check(g2, g3, config.gap_bands.hard)
+
+        merged = {**inferred, **_infer_untagged_generations(bundle, g1, g2, g3, er_config)}
+        if merged == inferred:
+            break
+        inferred = merged
 
     cross_case_flags = _cross_role_flags(g1_pool + g2_pool + g3_pool)
 
@@ -471,4 +528,5 @@ def resolve_lineage(bundle: CaseBundle, config: RulesConfig) -> LineageResult:
         g2=g2,
         g3=g3,
         cross_case_flags=cross_case_flags,
+        inferred_generations=inferred,
     )

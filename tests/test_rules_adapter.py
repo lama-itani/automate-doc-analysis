@@ -7,6 +7,7 @@ import json
 import pytest
 
 from ps06.classification.classifier import ClassificationResult, DocumentType
+from ps06.classification.field_extraction import FieldExtractionResult
 from ps06.ocr.envelope import OcrResult, get_extraction
 from ps06.ocr.extraction import ExtractionResult
 from ps06.rules.adapter import MissingExtractionError, adapt_document, build_case_bundle
@@ -34,6 +35,7 @@ def _extraction(
 def _result(
     *, case_id: str = "c1", document_id: str = "d1", extraction: ExtractionResult | None = None,
     classification: ClassificationResult | None = None,
+    field_extraction: FieldExtractionResult | None = None,
 ) -> OcrResult:
     return OcrResult.build(
         case_id=case_id,
@@ -43,6 +45,7 @@ def _result(
         processing_seconds=1.0,
         model_name="test-model",
         classification=classification,
+        field_extraction=field_extraction,
     )
 
 
@@ -116,9 +119,29 @@ def test_adapt_document_application_no_form_fields_leaves_solicitud_empty():
     assert doc.missing_fields == tuple(SOLICITUD_SOURCE_LABELS.keys())
 
 
-def test_adapt_document_application_firma_never_inferred():
+def test_adapt_document_application_firma_signed_when_field_non_empty():
     result = _result(
         extraction=_extraction(acroform_fields={"Firma": "X"}),
+        classification=ClassificationResult(document_type=DocumentType.APPLICATION),
+    )
+    doc = adapt_document(result)
+    assert doc.solicitud.firma is True
+    assert "firma" not in doc.missing_fields
+
+
+def test_adapt_document_application_firma_missing_when_field_absent():
+    result = _result(
+        extraction=_extraction(acroform_fields={"Nombre del solicitante": "Ana"}),
+        classification=ClassificationResult(document_type=DocumentType.APPLICATION),
+    )
+    doc = adapt_document(result)
+    assert doc.solicitud.firma is False
+    assert "firma" in doc.missing_fields
+
+
+def test_adapt_document_application_firma_missing_when_field_empty():
+    result = _result(
+        extraction=_extraction(acroform_fields={"Firma": "   "}),
         classification=ClassificationResult(document_type=DocumentType.APPLICATION),
     )
     doc = adapt_document(result)
@@ -133,6 +156,116 @@ def test_adapt_document_application_unmatched_form_fields_ignored():
     )
     doc = adapt_document(result)  # should not raise
     assert doc.solicitud == SolicitudData()
+
+
+# --- adapt_document: APPLICATION, real Anexo I/III/IV Textfield-N layouts ----
+
+
+def test_adapt_document_anexo_iv_maps_textfield_n_positionally():
+    # Field names/order taken from pymupdf inspection of the real Anexo IV
+    # AcroForm template (and a filled real-world sample).
+    result = _result(
+        extraction=_extraction(
+            extracted_text="A N E X O IV\nMODELO DE SOLICITUD...",
+            acroform_fields={
+                "Textfield": "Ricardo",
+                "Textfield_p1": "Ricardo",
+                "Textfield-0": "Minaya",
+                "Textfield-1": "Sainz",
+                "Textfield-2": "Española",
+                "Textfield-3": "Soltero",
+                "Textfield-4": "XDD882743",
+                "Textfield-5": "105a St James Rd, Sutton",
+                "Textfield-6": "Surrey",
+                "Textfield-7": "Reino Unido",
+                "Textfield-8": "7366835219",
+                "Textfield-9": "r.minaya.sainz@gmail.com",
+                "Textfield-10": "Ciudad de Mexico",
+                "Textfield-11": "005030",
+                "Textfield-12": "315",
+                "Textfield-13": "30/Nov/2015",
+            },
+        ),
+        classification=ClassificationResult(document_type=DocumentType.APPLICATION, generation="G1"),
+    )
+    doc = adapt_document(result)
+    s = doc.solicitud
+    assert s.nombre_solicitante == "Ricardo"
+    assert s.apellido_padre == "Minaya"
+    assert s.apellido_madre == "Sainz"
+    assert s.nacionalidad == "Española"
+    assert s.estado_civil == "Soltero"
+    assert s.numero_id == "XDD882743"
+    assert s.domicilio == "105a St James Rd, Sutton"
+    assert s.provincia == "Surrey"
+    assert s.pais == "Reino Unido"
+    assert s.telf_contacto == "7366835219"
+    assert s.email == "r.minaya.sainz@gmail.com"
+    assert s.registro_civil_inscripcion == "Ciudad de Mexico"
+    assert s.tomo == "005030"
+    assert s.folio == "315"
+    assert s.fecha_ejercicio_opcion == "30/Nov/2015"
+    # firma and checkbox-derived fields are never inferred -> stay missing.
+    assert "firma" in doc.missing_fields
+
+
+def test_adapt_document_anexo_iii_shares_anexo_iv_field_map():
+    result = _result(
+        extraction=_extraction(
+            extracted_text="ANEXO III\nModelo de solicitud...",
+            acroform_fields={
+                "Textfield": "Lucia",
+                "Textfield-0": "Perez",
+                "Textfield-4": "AB123456",
+            },
+        ),
+        classification=ClassificationResult(document_type=DocumentType.APPLICATION),
+    )
+    doc = adapt_document(result)
+    assert doc.solicitud.nombre_solicitante == "Lucia"
+    assert doc.solicitud.apellido_padre == "Perez"
+    assert doc.solicitud.numero_id == "AB123456"
+
+
+def test_adapt_document_anexo_i_uses_distinct_shifted_field_map():
+    # Anexo I's layout differs from III/IV: "Textfieldad" is the registry
+    # destination field, and "Textfield-3a" (not "-5") is domicilio, which
+    # shifts provincia/pais/telf/email up by one index.
+    result = _result(
+        extraction=_extraction(
+            extracted_text="ANEXO I\nModelo de solicitud...",
+            acroform_fields={
+                "Textfieldad": "Registro Civil de Madrid",
+                "Textfield": "Marta",
+                "Textfield-3a": "Calle Mayor 1",
+                "Textfield-5": "Madrid",
+                "Textfield-6": "España",
+                "Textfield-9": "Italiana",
+            },
+        ),
+        classification=ClassificationResult(document_type=DocumentType.APPLICATION),
+    )
+    doc = adapt_document(result)
+    assert doc.solicitud.registro_civil_inscripcion == "Registro Civil de Madrid"
+    assert doc.solicitud.nombre_solicitante == "Marta"
+    assert doc.solicitud.domicilio == "Calle Mayor 1"
+    assert doc.solicitud.provincia == "Madrid"
+    assert doc.solicitud.pais == "España"
+    assert doc.solicitud.nacionalidad_origen_progenitor == "Italiana"
+
+
+def test_adapt_document_non_anexo_source_still_uses_label_matching():
+    # No recognizable Anexo header -> falls back to exact-label matching,
+    # unaffected by the Textfield-N positional maps.
+    result = _result(
+        extraction=_extraction(
+            extracted_text="Some other application form",
+            acroform_fields={"Nombre del solicitante": "Ana"},
+        ),
+        classification=ClassificationResult(document_type=DocumentType.APPLICATION),
+    )
+    doc = adapt_document(result)
+    assert doc.solicitud.nombre_solicitante == "Ana"
 
 
 # --- adapt_document: ID_DOCUMENT / BIRTH_CERT --------------------------------
@@ -154,6 +287,76 @@ def test_adapt_document_birth_cert_always_none_with_full_missing_fields():
     doc = adapt_document(result)
     assert doc.certificado is None
     assert doc.missing_fields == tuple(CertificadoData.model_fields.keys())
+
+
+def test_adapt_document_id_document_full_fields_populates_identidad():
+    fields = {
+        "tipo_id": "Pasaporte",
+        "numero_id": "XDD882743",
+        "apellidos": "Minaya Sainz",
+        "nombres": "Ricardo",
+        "nacionalidad": "Española",
+        "sexo": "M",
+        "fecha_nacimiento": "01/02/1990",
+        "fecha_emision": "01/01/2020",
+        "fecha_vencimiento": "01/01/2030",
+    }
+    result = _result(
+        classification=ClassificationResult(document_type=DocumentType.ID_DOCUMENT),
+        field_extraction=FieldExtractionResult(fields=fields),
+    )
+    doc = adapt_document(result)
+    assert doc.identidad == IdData(**fields)
+    assert doc.missing_fields == ()
+
+
+def test_adapt_document_id_document_partial_fields_reports_missing():
+    result = _result(
+        classification=ClassificationResult(document_type=DocumentType.ID_DOCUMENT),
+        field_extraction=FieldExtractionResult(fields={"nombres": "Ricardo"}),
+    )
+    doc = adapt_document(result)
+    assert doc.identidad.nombres == "Ricardo"
+    assert doc.identidad.numero_id is None
+    assert "numero_id" in doc.missing_fields
+    assert "nombres" not in doc.missing_fields
+
+
+def test_adapt_document_birth_cert_full_fields_populates_certificado():
+    fields = {
+        "grado_certificado": "G2",
+        "nombre": "Maria Lopez",
+        "fecha_nacimiento": "05/05/1965",
+        "sexo": "F",
+        "lugar_inscripcion": "Madrid",
+        "fecha_inscripcion": "10/05/1965",
+        "progenitor1_nombre": "Jose Lopez",
+        "progenitor1_num_doc": "12345678",
+        "progenitor1_nacionalidad": "Española",
+        "progenitor2_nombre": "Carmen Ruiz",
+        "progenitor2_num_doc": "87654321",
+        "progenitor2_nacionalidad": "Española",
+        "apostillado": "APOSTILLE / La Haya",
+    }
+    result = _result(
+        classification=ClassificationResult(document_type=DocumentType.BIRTH_CERT),
+        field_extraction=FieldExtractionResult(fields=fields),
+    )
+    doc = adapt_document(result)
+    assert doc.certificado.grado_certificado == "G2"
+    assert doc.certificado.nombre == "Maria Lopez"
+    assert doc.certificado.apostillado is True
+    assert doc.missing_fields == ()
+
+
+def test_adapt_document_birth_cert_missing_apostillado_defaults_false_and_missing():
+    result = _result(
+        classification=ClassificationResult(document_type=DocumentType.BIRTH_CERT),
+        field_extraction=FieldExtractionResult(fields={"nombre": "Maria Lopez"}),
+    )
+    doc = adapt_document(result)
+    assert doc.certificado.apostillado is False
+    assert "apostillado" in doc.missing_fields
 
 
 # --- adapt_document: OTHER / EMPTY / classification=None --------------------
