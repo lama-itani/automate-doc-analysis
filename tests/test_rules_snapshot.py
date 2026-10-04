@@ -55,7 +55,12 @@ def _full_case_corroborated():
         _doc(
             "app",
             DocumentType.APPLICATION,
-            solicitud=SolicitudData(nombre_solicitante="Ana", apellido_padre="Garcia", numero_id="1"),
+            solicitud=SolicitudData(
+                nombre_solicitante="Ana",
+                apellido_padre="Garcia",
+                numero_id="1",
+                fecha_presentacion="01/10/2025",
+            ),
         ),
         _doc(
             "id1",
@@ -128,7 +133,9 @@ def test_rojo_snapshot_passes_through_problemas():
     app = _doc(
         "app",
         DocumentType.APPLICATION,
-        solicitud=SolicitudData(nombre_solicitante="Ana", numero_id="1"),
+        solicitud=SolicitudData(
+            nombre_solicitante="Ana", numero_id="1", fecha_presentacion="01/10/2025"
+        ),
     )
     id_doc = _doc(
         "id_expired",

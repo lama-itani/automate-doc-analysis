@@ -61,7 +61,12 @@ def _full_case(**overrides):
     app = _doc(
         "app",
         DocumentType.APPLICATION,
-        solicitud=SolicitudData(nombre_solicitante="Ana", apellido_padre="Garcia", numero_id="1"),
+        solicitud=SolicitudData(
+            nombre_solicitante="Ana",
+            apellido_padre="Garcia",
+            numero_id="1",
+            fecha_presentacion="01/10/2025",
+        ),
     )
     id_doc = _doc(
         "id1",
@@ -118,7 +123,7 @@ def test_evaluate_document_vencido_true_when_expiry_passed():
         DocumentType.ID_DOCUMENT,
         identidad=IdData(fecha_vencimiento="01/01/2020"),
     )
-    evaluation = evaluate_document(doc, EVAL_DATE)
+    evaluation = evaluate_document(doc, EVAL_DATE, EVAL_DATE)
     assert "DOCUMENTO_VENCIDO" in evaluation.flags
 
 
@@ -144,14 +149,14 @@ def test_evaluate_document_uses_vencimiento_reference_date_over_evaluation_date(
     assert "DOCUMENTO_VENCIDO" in evaluation.flags
 
 
-def test_evaluate_document_falls_back_to_evaluation_date_when_reference_absent():
+def test_evaluate_document_skips_vencido_check_when_reference_absent():
     doc = _doc(
         "d1",
         DocumentType.ID_DOCUMENT,
         identidad=IdData(fecha_vencimiento="01/01/2020"),
     )
     evaluation = evaluate_document(doc, EVAL_DATE, None)
-    assert "DOCUMENTO_VENCIDO" in evaluation.flags
+    assert "DOCUMENTO_VENCIDO" not in evaluation.flags
 
 
 # --- check_expected_documents ------------------------------------------------
@@ -310,6 +315,32 @@ def test_documento_vencido_forces_rojo():
     assert "DOCUMENTO_VENCIDO" in decision.rojo_flags
 
 
+def test_missing_fecha_presentacion_skips_vencido_and_raises_amarillo_flag():
+    """application present but fecha_presentacion absent -- even a long-
+    expired ID must not trigger DOCUMENTO_VENCIDO (no silent fallback to
+    evaluation_date), and the gap itself must surface as AMARILLO, not
+    VERDE."""
+    docs = _full_case(
+        app=_doc(
+            "app",
+            DocumentType.APPLICATION,
+            solicitud=SolicitudData(nombre_solicitante="Ana", apellido_padre="Garcia", numero_id="1"),
+        )
+    )
+    docs.append(
+        _doc(
+            "id_expired",
+            DocumentType.ID_DOCUMENT,
+            identidad=IdData(fecha_vencimiento="01/01/2000"),
+        )
+    )
+    decision = _decide(*docs)
+    assert decision.estado == "AMARILLO"
+    assert "DOCUMENTO_VENCIDO" not in decision.rojo_flags
+    assert "FECHA_PRESENTACION_FALTANTE" in decision.amarillo_flags
+    assert "FECHA_PRESENTACION_FALTANTE" in decision.problemas
+
+
 def test_nombre_ambiguo_forces_rojo():
     docs = _full_case()
     docs.append(
@@ -441,7 +472,9 @@ def test_rojo_takes_precedence_over_missing_docs_and_amarillo_flags():
     app = _doc(
         "app",
         DocumentType.APPLICATION,
-        solicitud=SolicitudData(nombre_solicitante="Ana", numero_id="1"),
+        solicitud=SolicitudData(
+            nombre_solicitante="Ana", numero_id="1", fecha_presentacion="01/10/2025"
+        ),
         missing_fields=("nacionalidad",),
     )
     id_doc = _doc(

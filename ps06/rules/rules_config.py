@@ -109,6 +109,7 @@ class SeverityMapping(BaseModel):
     amarillo: tuple[str, ...] = (
         "DOCUMENT_INCOMPLETE",
         "NACIONALIDAD_INCONSISTENTE",
+        "FECHA_PRESENTACION_FALTANTE",
     )
 
 
@@ -123,8 +124,10 @@ class RulesConfig(BaseModel):
     #: ``fecha_presentacion`` plus this many months, not the run's
     #: ``evaluation_date`` — a passport must still be valid this far past
     #: *when the applicant actually applied*, not past whatever day the
-    #: pipeline happens to run. Falls back to ``evaluation_date`` only when
-    #: ``fecha_presentacion`` is absent/unparseable (semaphore.py).
+    #: pipeline happens to run. When ``fecha_presentacion`` is
+    #: absent/unparseable, the check is skipped entirely (not evaluated
+    #: against ``evaluation_date``) and ``FECHA_PRESENTACION_FALTANTE`` is
+    #: raised instead (semaphore.py).
     document_validity_months_past_application: int = 6
     expected_documents: tuple[ExpectedDocument, ...] = Field(
         default_factory=lambda: (

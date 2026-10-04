@@ -154,6 +154,11 @@ def test_parse_date_supports_spanish_de_date_words():
     assert parse_date("30 de noviembre de 2015") == date(2015, 11, 30)
 
 
+def test_parse_date_supports_spanish_month_name_with_plain_spaces():
+    assert parse_date("22 Octubre 2025") == date(2025, 10, 22)
+    assert parse_date("30 Nov 2015") == date(2015, 11, 30)
+
+
 def test_parse_date_supports_fully_spelled_out_spanish_date():
     assert parse_date("27 SEPTIEMBRE MIL NOVECIENTOS SESENTA") == date(1960, 9, 27)
 
@@ -163,6 +168,7 @@ def test_parse_date_returns_none_for_unparseable_or_absent():
     assert parse_date("") is None
     assert parse_date("not a date") is None
     assert parse_date("May 1, 1990") is None
+    assert parse_date("22 Octember 2025") is None
 
 
 def test_parse_date_never_raises_on_garbage():

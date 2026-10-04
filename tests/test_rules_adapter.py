@@ -209,6 +209,68 @@ def test_adapt_document_anexo_iv_maps_textfield_n_positionally():
     assert "firma" in doc.missing_fields
 
 
+def test_adapt_document_anexo_iv_maps_signing_block_date_and_place():
+    result = _result(
+        extraction=_extraction(
+            extracted_text="A N E X O IV\nMODELO DE SOLICITUD...",
+            acroform_fields={
+                "Textfield": "Ricardo",
+                "Textfield-0": "Minaya",
+                "Textfield-4": "XDD882743",
+                "En": "Londres",
+                "a": "22",
+                "de": "Octubre",
+                "de-0": "2025",
+            },
+        ),
+        classification=ClassificationResult(document_type=DocumentType.APPLICATION, generation="G1"),
+    )
+    doc = adapt_document(result)
+    assert doc.solicitud.lugar_presentacion == "Londres"
+    assert doc.solicitud.fecha_presentacion == "22/Octubre/2025"
+    assert "lugar_presentacion" not in doc.missing_fields
+    assert "fecha_presentacion" not in doc.missing_fields
+
+
+def test_adapt_document_anexo_iv_fecha_presentacion_unset_when_day_missing():
+    result = _result(
+        extraction=_extraction(
+            extracted_text="A N E X O IV\nMODELO DE SOLICITUD...",
+            acroform_fields={
+                "Textfield": "Ricardo",
+                "de": "Octubre",
+                "de-0": "2025",
+            },
+        ),
+        classification=ClassificationResult(document_type=DocumentType.APPLICATION, generation="G1"),
+    )
+    doc = adapt_document(result)
+    assert doc.solicitud.fecha_presentacion is None
+    assert "fecha_presentacion" in doc.missing_fields
+
+
+def test_adapt_document_anexo_i_does_not_map_signing_block_fields():
+    result = _result(
+        extraction=_extraction(
+            extracted_text="ANEXO I\nModelo de solicitud...",
+            acroform_fields={
+                "Textfieldad": "Registro Civil de Madrid",
+                "Textfield": "Lucia",
+                "En": "Londres",
+                "a": "22",
+                "de": "Octubre",
+                "de-0": "2025",
+            },
+        ),
+        classification=ClassificationResult(document_type=DocumentType.APPLICATION),
+    )
+    doc = adapt_document(result)
+    assert doc.solicitud.lugar_presentacion is None
+    assert doc.solicitud.fecha_presentacion is None
+    assert "lugar_presentacion" in doc.missing_fields
+    assert "fecha_presentacion" in doc.missing_fields
+
+
 def test_adapt_document_anexo_iii_shares_anexo_iv_field_map():
     result = _result(
         extraction=_extraction(
