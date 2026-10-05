@@ -74,3 +74,7 @@ severity:
     # DOCUMENTO_VENCIDO cannot be evaluated against it — raised instead of
     # silently falling back to evaluation_date (see semaphore.py).
     - FECHA_PRESENTACION_FALTANTE
+    # Raised when a G1/G3 self-match (or the G2-ambiguous-parent fallback)
+    # only merged because DOB was missing/unparseable on one side and the
+    # name-only fallback gate was used instead of the strict 2-of-3 gate.
+    - GENERACION_INFERIDA_BAJA_CONFIANZA

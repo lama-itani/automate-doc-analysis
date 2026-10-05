@@ -11,6 +11,7 @@ from ps06.rules.normalize import (
     fold_doc_number,
     fold_name,
     fold_nationality,
+    name_similarity,
     names_fuzzy_match,
     names_match,
     nfkc,
@@ -111,6 +112,16 @@ def test_names_fuzzy_match_handles_subset_tokens():
 
 def test_names_fuzzy_match_exact_after_fold_is_still_a_match():
     assert names_fuzzy_match("García", "garcia")
+
+
+def test_name_similarity_graded_score():
+    assert name_similarity("Ana García", "ana garcia") == 1.0
+    assert name_similarity("Ana García", None) == 0.0
+    assert name_similarity(None, "Ana García") == 0.0
+    assert name_similarity("", "") == 0.0
+    close = name_similarity("Maria Garcia Lopez", "Maria Garcia")
+    distant = name_similarity("Maria Garcia Lopez", "Pedro Ruiz")
+    assert 0.0 < distant < close < 1.0
 
 
 # --- Document number folding --------------------------------------------------
