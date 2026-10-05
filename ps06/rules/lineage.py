@@ -10,7 +10,8 @@ This module owns entity resolution (2-of-3 matching, union-find grouping) and
 every conflict flag that requires grouping raw values by resolved person
 first: ``NOMBRE_AMBIGUO``, ``NOMBRE_INCONSISTENTE``, ``ID_INCONSISTENTE``,
 ``DOCUMENTO_CRUZADO``, ``FECHA_CONFLICTO``, ``BRECHA_GENERACIONAL``,
-``NACIONALIDAD_INCONSISTENTE``. :mod:`ps06.rules.flags` only supplies the
+``NACIONALIDAD_INCONSISTENTE``, ``GENERACION_INFERIDA_BAJA_CONFIANZA``.
+:mod:`ps06.rules.flags` only supplies the
 pure per-value predicates; :mod:`ps06.rules.semaphore` (step 7) only
 classifies severity from the flags this module raises — it never re-derives
 person-level grouping.
@@ -33,7 +34,7 @@ No I/O, no case/document identity beyond what's in ``CaseBundle`` already.
 from __future__ import annotations
 
 from datetime import date
-from typing import Iterable, Optional
+from typing import Callable, Iterable, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -42,6 +43,7 @@ from ps06.rules.normalize import (
     dates_within_years,
     doc_numbers_match,
     fold_doc_number,
+    name_similarity,
     names_fuzzy_match,
     parse_date,
 )
@@ -296,15 +298,20 @@ def _match_score(
 def _infer_untagged_generations(
     bundle: CaseBundle,
     g1: RoleResolution,
-    g2: RoleResolution,
+    g2_candidates: tuple[RoleResolution, ...],
+    g2_match_fn: "_MatchFn",
     g3: RoleResolution,
     er_config: EntityResolutionConfig,
 ) -> dict[str, Generation]:
     """Map untagged birth certs to a generation by matching their subject.
 
     First-match-wins across G1->G2->G3: a cert's subject is one specific
-    person, never two generations at once.
+    person, never two generations at once. G2 may have multiple candidate
+    resolutions (one per parent slot) when G1 resolved cleanly — a cert
+    matching *any* non-ambiguous candidate counts as G2, even if that
+    candidate isn't the one ``resolve_lineage`` collapsed to as ``g2.person``.
     """
+    strict = _strict_match_fn(er_config)
     inferred: dict[str, Generation] = {}
     for doc in bundle.birth_certificates:
         if doc.generation is not None:
@@ -312,16 +319,25 @@ def _infer_untagged_generations(
         (record,) = _records_from_certificado(doc) or (None,)
         if record is None or record.is_empty:
             continue
-        for generation, role in (("G1", g1), ("G2", g2), ("G3", g3)):
+        if g1.person is not None and not g1.ambiguous and strict(
+            record, _candidate_from_person(g1.person)
+        ):
+            inferred[doc.document_id] = "G1"
+            continue
+        matched_g2 = False
+        for role in g2_candidates:
             if role.person is None or role.ambiguous:
                 continue
-            if _match_score(
-                record,
-                _candidate_from_person(role.person),
-                dob_tolerance_years=er_config.dob_tolerance_years,
-            ) >= er_config.min_criteria:
-                inferred[doc.document_id] = generation
+            if g2_match_fn(record, _candidate_from_person(role.person)):
+                inferred[doc.document_id] = "G2"
+                matched_g2 = True
                 break
+        if matched_g2:
+            continue
+        if g3.person is not None and not g3.ambiguous and strict(
+            record, _candidate_from_person(g3.person)
+        ):
+            inferred[doc.document_id] = "G3"
     return inferred
 
 
@@ -373,21 +389,69 @@ def _merge_person(
     return person, tuple(hit_flags)
 
 
+_MatchFn = Callable[[_CandidateRecord, _CandidateRecord], bool]
+
+
+def _strict_match_fn(er_config: EntityResolutionConfig) -> _MatchFn:
+    """The generic 2-of-3 (name/DOB/doc-number) gate used by G1, G3, and the
+    G2-ambiguous-parent fallback. Preserved as its own factory so every
+    existing call site keeps byte-for-byte identical behavior."""
+    return lambda a, b: _match_score(
+        a, b, dob_tolerance_years=er_config.dob_tolerance_years
+    ) >= er_config.min_criteria
+
+
+def _name_only_fallback_match_fn(a: _CandidateRecord, b: _CandidateRecord) -> bool:
+    """Name-only fallback for G1/G3 self-match (and the G2-ambiguous-parent
+    fallback), applied only when the strict gate fails. Fires only when DOB
+    is missing/unparseable on at least one side - never when both sides have
+    a DOB that disagrees, which must stay a real conflict (``FECHA_CONFLICTO``
+    territory), not get silently merged away.
+    """
+    if not names_fuzzy_match(a.name, b.name):
+        return False
+    return a.fecha_nacimiento is None or b.fecha_nacimiento is None
+
+
+def _g2_match_fn(a: _CandidateRecord, b: _CandidateRecord) -> bool:
+    """G2 slot match gate: name alone suffices.
+
+    Every record reaching a G2 slot pool is already corroborated by
+    construction — either pulled straight from G1's own resolved birth
+    certificate, or assigned into the slot because its name matched. The
+    generic 3-signal gate can never clear here: progenitor records never
+    carry a DOB, and a birth-cert subject's own record never carries a
+    document number, so name is the only signal both sides can ever share.
+    """
+    return names_fuzzy_match(a.name, b.name)
+
+
 def _resolve_role(
     generation: Generation,
     records: Iterable[_CandidateRecord],
-    er_config: EntityResolutionConfig,
+    match_fn: _MatchFn,
+    fallback_match_fn: Optional[_MatchFn] = None,
 ) -> RoleResolution:
-    """Resolve one generation's candidate pool into a :class:`RoleResolution`."""
+    """Resolve one generation's candidate pool into a :class:`RoleResolution`.
+
+    ``fallback_match_fn``, when given, is OR'd into the match used to group
+    records - but only when it actually changed the outcome (the strict-only
+    grouping would have left the pool split into >1 components) does the
+    resulting merge get flagged ``GENERACION_INFERIDA_BAJA_CONFIANZA``, since
+    that's the only way to know the merge needed the weaker signal.
+    """
     pool = [r for r in records if not r.is_empty]
 
     if not pool:
         return RoleResolution(generation=generation, person=None)
 
+    def combined(a: _CandidateRecord, b: _CandidateRecord) -> bool:
+        return match_fn(a, b) or (fallback_match_fn is not None and fallback_match_fn(a, b))
+
     uf = _UnionFind(len(pool))
     for i in range(len(pool)):
         for j in range(i + 1, len(pool)):
-            if _match_score(pool[i], pool[j], dob_tolerance_years=er_config.dob_tolerance_years) >= er_config.min_criteria:
+            if combined(pool[i], pool[j]):
                 uf.union(i, j)
 
     components: dict[int, list[_CandidateRecord]] = {}
@@ -404,6 +468,17 @@ def _resolve_role(
 
     (component,) = components.values()
     person, hit_flags = _merge_person(generation, component)
+
+    if fallback_match_fn is not None and len(pool) > 1:
+        strict_uf = _UnionFind(len(pool))
+        for i in range(len(pool)):
+            for j in range(i + 1, len(pool)):
+                if match_fn(pool[i], pool[j]):
+                    strict_uf.union(i, j)
+        strict_roots = {strict_uf.find(idx) for idx in range(len(pool))}
+        if len(strict_roots) > 1:
+            hit_flags = hit_flags + ("GENERACION_INFERIDA_BAJA_CONFIANZA",)
+
     corroborating_ids = tuple(dict.fromkeys(r.source_document_id for r in component))
     return RoleResolution(
         generation=generation,
@@ -444,6 +519,74 @@ def _child_pool(
     for cert in own_certs:
         pool.extend(_records_from_certificado(cert))
     return pool
+
+
+def _g2_slot_pools(
+    g1: RoleResolution, g1_certs: tuple[CanonicalDocument, ...]
+) -> tuple[list[_CandidateRecord], list[_CandidateRecord]]:
+    """Progenitor1 / progenitor2 candidate records, kept separate by slot.
+
+    Only called when ``g1`` resolved cleanly. Unlike :func:`_child_pool`,
+    which pools both progenitors together, this keeps the two parents as
+    distinct candidates so a legitimately-two-parent case doesn't collapse
+    into one undifferentiated (and often falsely ambiguous) pool.
+    """
+    slot1: list[_CandidateRecord] = []
+    slot2: list[_CandidateRecord] = []
+    for cert in g1_certs:
+        slot1.extend(_records_from_certificado(cert, use_progenitor=1))
+        slot2.extend(_records_from_certificado(cert, use_progenitor=2))
+    return slot1, slot2
+
+
+def _assign_to_slot(
+    record: _CandidateRecord,
+    slot1_names: list[str],
+    slot2_names: list[str],
+) -> Optional[int]:
+    """Which parent slot ``record``'s name belongs to: 1, 2, or ``None``
+    (ambiguous/no match - caller routes to an overflow pool instead of
+    guessing). Ties a name matching both slots using the strongest fuzzy
+    match against either slot's known names, since no sexo signal exists on
+    progenitor records to disambiguate otherwise.
+    """
+    m1 = any(names_fuzzy_match(record.name, n) for n in slot1_names)
+    m2 = any(names_fuzzy_match(record.name, n) for n in slot2_names)
+    if m1 and not m2:
+        return 1
+    if m2 and not m1:
+        return 2
+    if not m1 and not m2:
+        return None
+    s1 = max((name_similarity(record.name, n) for n in slot1_names), default=0.0)
+    s2 = max((name_similarity(record.name, n) for n in slot2_names), default=0.0)
+    if s1 > s2:
+        return 1
+    if s2 > s1:
+        return 2
+    return None
+
+
+def _collapse_g2(candidates: tuple[RoleResolution, ...]) -> RoleResolution:
+    """Pick one representative G2 resolution out of per-slot candidates.
+
+    Decision: only one parent needs to resolve for the G2 role to "count" —
+    prefer the best-corroborated cleanly-resolved candidate; otherwise
+    surface whichever ambiguous/rejected signal is present so the role
+    doesn't silently look unresolved for no reason.
+    """
+    resolved = [
+        r for r in candidates if r.person is not None and not r.ambiguous and not r.rejected
+    ]
+    if resolved:
+        return max(resolved, key=lambda r: len(r.corroborating_document_ids))
+    ambiguous = [r for r in candidates if r.ambiguous]
+    if ambiguous:
+        return ambiguous[0]
+    rejected = [r for r in candidates if r.rejected]
+    if rejected:
+        return rejected[0]
+    return RoleResolution(generation="G2", person=None)
 
 
 def _apply_generational_gap_check(
@@ -503,19 +646,68 @@ def resolve_lineage(bundle: CaseBundle, config: RulesConfig) -> LineageResult:
             g1_pool.extend(_records_from_id(doc))
         for cert in g1_certs:
             g1_pool.extend(_records_from_certificado(cert))
-        g1 = _resolve_role("G1", g1_pool, er_config)
+        strict = _strict_match_fn(er_config)
+        g1 = _resolve_role("G1", g1_pool, strict, _name_only_fallback_match_fn)
 
         g2_certs = _certs_for_generation(bundle, "G2", inferred)
-        g2_pool = _child_pool(g1, g1_certs, g2_certs)
-        g2 = _resolve_role("G2", g2_pool, er_config)
-        g2 = _apply_generational_gap_check(g1, g2, config.gap_bands.hard)
+        if g1.person is not None and not g1.ambiguous:
+            slot1_raw, slot2_raw = _g2_slot_pools(g1, g1_certs)
+            slot1_names = [r.name for r in slot1_raw if r.name]
+            slot2_names = [r.name for r in slot2_raw if r.name]
+
+            own_slot1: list[_CandidateRecord] = []
+            own_slot2: list[_CandidateRecord] = []
+            overflow: list[_CandidateRecord] = []
+            for cert in g2_certs:
+                for record in _records_from_certificado(cert):
+                    if record.is_empty:
+                        continue
+                    slot = _assign_to_slot(record, slot1_names, slot2_names)
+                    if slot == 1:
+                        own_slot1.append(record)
+                    elif slot == 2:
+                        own_slot2.append(record)
+                    else:
+                        overflow.append(record)
+
+            slot1_role = _apply_generational_gap_check(
+                g1, _resolve_role("G2", slot1_raw + own_slot1, _g2_match_fn), config.gap_bands.hard
+            )
+            slot2_role = _apply_generational_gap_check(
+                g1, _resolve_role("G2", slot2_raw + own_slot2, _g2_match_fn), config.gap_bands.hard
+            )
+            overflow_role = (
+                _apply_generational_gap_check(
+                    g1, _resolve_role("G2", overflow, _g2_match_fn), config.gap_bands.hard
+                )
+                if overflow
+                else None
+            )
+            g2_candidates = tuple(
+                r for r in (slot1_role, slot2_role, overflow_role) if r is not None
+            )
+            g2 = _collapse_g2(g2_candidates)
+            g2_pool = slot1_raw + own_slot1 + slot2_raw + own_slot2 + overflow
+            g2_match_fn: _MatchFn = _g2_match_fn
+        else:
+            g2_pool = _child_pool(g1, g1_certs, g2_certs)
+            g2 = _apply_generational_gap_check(
+                g1,
+                _resolve_role("G2", g2_pool, strict, _name_only_fallback_match_fn),
+                config.gap_bands.hard,
+            )
+            g2_candidates = (g2,)
+            g2_match_fn = strict
 
         g3_certs = _certs_for_generation(bundle, "G3", inferred)
         g3_pool = _child_pool(g2, g2_certs, g3_certs)
-        g3 = _resolve_role("G3", g3_pool, er_config)
+        g3 = _resolve_role("G3", g3_pool, strict, _name_only_fallback_match_fn)
         g3 = _apply_generational_gap_check(g2, g3, config.gap_bands.hard)
 
-        merged = {**inferred, **_infer_untagged_generations(bundle, g1, g2, g3, er_config)}
+        merged = {
+            **inferred,
+            **_infer_untagged_generations(bundle, g1, g2_candidates, g2_match_fn, g3, er_config),
+        }
         if merged == inferred:
             break
         inferred = merged

@@ -28,6 +28,7 @@ Pure text/string functions only — no I/O, no model calls.
 from __future__ import annotations
 
 import calendar
+import difflib
 import re
 import unicodedata
 from datetime import date, datetime
@@ -154,6 +155,19 @@ def names_fuzzy_match(a: Optional[str], b: Optional[str]) -> bool:
     tokens_a, tokens_b = set(fa.split()), set(fb.split())
     shorter, longer = (tokens_a, tokens_b) if len(tokens_a) <= len(tokens_b) else (tokens_b, tokens_a)
     return bool(shorter) and shorter.issubset(longer)
+
+
+def name_similarity(a: Optional[str], b: Optional[str]) -> float:
+    """Graded 0.0-1.0 similarity between two names, after :func:`fold_name`.
+
+    Only meaningful for breaking a tie between two candidates that already
+    pass :func:`names_fuzzy_match` against the same probe name — not a
+    replacement for that boolean gate.
+    """
+    fa, fb = fold_name(a), fold_name(b)
+    if not fa or not fb:
+        return 0.0
+    return difflib.SequenceMatcher(None, fa, fb).ratio()
 
 
 # ---------------------------------------------------------------------------

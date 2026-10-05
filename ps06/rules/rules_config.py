@@ -110,6 +110,7 @@ class SeverityMapping(BaseModel):
         "DOCUMENT_INCOMPLETE",
         "NACIONALIDAD_INCONSISTENTE",
         "FECHA_PRESENTACION_FALTANTE",
+        "GENERACION_INFERIDA_BAJA_CONFIANZA",
     )
 
 
