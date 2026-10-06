@@ -1,10 +1,10 @@
 """Small CLI to exercise the PS-06 per-document OCR job by hand (M-2).
 
 Not part of the production surface — a convenience for local inspection,
-mirroring ``ps06/status/cli.py``'s style. ``CDSWAuthProvider`` (see
-``ps06.ocr.auth``) is an honest stub that always raises ``NotImplementedError``
-until live Cloudera/Workbench credentials land (Build Handoff open item #4), so
-today the only way to actually exercise a ``run`` is ``--auth fake``.
+mirroring ``ps06/status/cli.py``'s style. ``--auth cdsw`` (the default) reads
+the access token Cloudera AI puts at ``/tmp/jwt`` inside sessions and jobs (see
+``ps06.ocr.auth``); ``--auth fake`` takes a hand-obtained token for local
+testing. Jobs run through ``jobs/ocr_job.py``, which refuses ``--auth fake``.
 
 Usage (no reinstall needed)::
 
@@ -170,8 +170,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--classification-min-chars", type=int, default=10)
     p_run.add_argument(
         "--auth", choices=["cdsw", "fake"], default="cdsw",
-        help="token provider: 'cdsw' (real, not yet implemented) or 'fake' "
-        "(--fake-token, for local hand-testing)",
+        help="token provider: 'cdsw' (real: reads /tmp/jwt, only inside Cloudera AI "
+        "sessions/jobs) or 'fake' (--fake-token, for local hand-testing only)",
     )
     p_run.add_argument(
         "--fake-token", action="append", default=None,
