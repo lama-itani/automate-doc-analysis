@@ -35,13 +35,14 @@ import shutil
 import sqlite3
 import threading
 import unicodedata
+from contextlib import contextmanager
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path, PurePosixPath
 from typing import Literal, Optional
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -653,7 +654,10 @@ def create_app(
     app.state.runner = runner
     app.state.settings = settings
 
-    def get_store() -> Iterator[StatusStore]:
+    @contextmanager
+    def open_store() -> Iterator[StatusStore]:
+        # Opened and closed inside the endpoint: sync endpoints run on one
+        # worker thread, and sqlite3 connections must stay on their thread.
         conn = db.connect(settings.db_path)
         try:
             yield StatusStore(conn)
@@ -665,7 +669,11 @@ def create_app(
         return {"status": "ok", "model": settings.model_name, "ui_built": ui_built}
 
     @app.get("/api/cases", response_model=list[CaseListItem])
-    def list_cases(store: StatusStore = Depends(get_store)) -> list[CaseListItem]:
+    def list_cases() -> list[CaseListItem]:
+        with open_store() as store:
+            return _list_cases(store)
+
+    def _list_cases(store: StatusStore) -> list[CaseListItem]:
         cases = store.connection.execute(
             "SELECT case_id, MAX(last_updated) AS last FROM document_status "
             "GROUP BY case_id ORDER BY last DESC, case_id;"
@@ -690,7 +698,12 @@ def create_app(
     def upload_case(
         case_id: str = Form(...),
         files: list[UploadFile] = File(...),
-        store: StatusStore = Depends(get_store),
+    ) -> CaseOut:
+        with open_store() as store:
+            return _upload_case(store, case_id, files)
+
+    def _upload_case(
+        store: StatusStore, case_id: str, files: list[UploadFile]
     ) -> CaseOut:
         case_id = _nfc(case_id)
         _check_name("case id", case_id)
@@ -759,11 +772,16 @@ def create_app(
         return _case_out(store, case_id, runner)
 
     @app.get("/api/cases/{case_id}", response_model=CaseOut)
-    def case_status(case_id: str, store: StatusStore = Depends(get_store)) -> CaseOut:
-        return _case_out(store, case_id, runner)
+    def case_status(case_id: str) -> CaseOut:
+        with open_store() as store:
+            return _case_out(store, case_id, runner)
 
     @app.get("/api/cases/{case_id}/verdict", response_model=VerdictOut)
-    def case_verdict(case_id: str, store: StatusStore = Depends(get_store)) -> VerdictOut:
+    def case_verdict(case_id: str) -> VerdictOut:
+        with open_store() as store:
+            return _case_verdict(store, case_id)
+
+    def _case_verdict(store: StatusStore, case_id: str) -> VerdictOut:
         rows = store.list_for_case(case_id)
         if not rows:
             raise HTTPException(404, f"unknown case: {case_id!r}")
