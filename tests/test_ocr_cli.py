@@ -15,6 +15,8 @@ import json
 import pytest
 
 from ps06.ocr import cli
+from ps06.ocr.envelope import get_extraction
+from ps06.ocr.result_file import read_result_file
 from ps06.status import db
 from ps06.status.states import DocumentStage
 from ps06.status.store import StatusStore
@@ -188,3 +190,75 @@ class TestShow:
         assert exit_code == 1
         err = capsys.readouterr().err
         assert "no extraction found" in err
+
+
+class TestResultOut:
+    """``run --result-out``: the job's report to the API (ps06.ocr.result_file)."""
+
+    def test_success_writes_ok_file_matching_db(
+        self, tmp_path, pdf_with_text_layer, fake_openai_client_factory
+    ):
+        db_path = tmp_path / "job.db"
+        out = tmp_path / "spool" / "case-1" / "doc-1.json"
+
+        exit_code = cli.main(
+            _run_argv(
+                db_path, "--file", str(pdf_with_text_layer), "--auto-register",
+                "--result-out", str(out),
+            ),
+            client_factory=fake_openai_client_factory,
+        )
+
+        assert exit_code == 0
+        rf = read_result_file(out)
+        assert rf.ok and rf.case_id == "case-1" and rf.document_id == "doc-1"
+        conn = db.connect(str(db_path))
+        try:
+            assert get_extraction(StatusStore(conn), "case-1", "doc-1") == rf.result
+        finally:
+            conn.close()
+
+    def test_failure_writes_error_file_with_detail(
+        self, tmp_path, fake_openai_client_factory
+    ):
+        db_path = tmp_path / "job.db"
+        out = tmp_path / "spool" / "case-1" / "doc-1.json"
+        argv = _run_argv(
+            db_path, "--file", str(tmp_path / "missing.pdf"), "--auto-register",
+            "--result-out", str(out),
+        )
+
+        with pytest.raises(FileNotFoundError):
+            cli.main(argv, client_factory=fake_openai_client_factory)
+
+        rf = read_result_file(out)
+        assert not rf.ok
+        assert rf.error_detail.startswith("FileNotFoundError: ")
+
+    def test_unwritable_result_path_keeps_original_error(
+        self, tmp_path, capsys, fake_openai_client_factory
+    ):
+        blocker = tmp_path / "blocker"
+        blocker.write_text("not a dir")
+        out = blocker / "doc-1.json"  # parent is a file: cannot write here
+        argv = _run_argv(
+            tmp_path / "job.db", "--file", str(tmp_path / "missing.pdf"),
+            "--auto-register", "--result-out", str(out),
+        )
+
+        with pytest.raises(FileNotFoundError):
+            cli.main(argv, client_factory=fake_openai_client_factory)
+
+        assert "could not write result file" in capsys.readouterr().err
+        assert not out.exists()
+
+    def test_no_result_out_writes_nothing(
+        self, tmp_path, pdf_with_text_layer, fake_openai_client_factory
+    ):
+        db_path = tmp_path / "job.db"
+        exit_code = cli.main(
+            _run_argv(db_path, "--file", str(pdf_with_text_layer), "--auto-register"),
+            client_factory=fake_openai_client_factory,
+        )
+        assert exit_code == 0
+        assert sorted(p.name for p in tmp_path.iterdir() if p.suffix == ".json") == []

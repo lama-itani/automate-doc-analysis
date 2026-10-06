@@ -15,6 +15,12 @@ Usage (no reinstall needed)::
         --endpoint-url http://fake --model-name test-model \\
         --auth fake --fake-token tok1 --fake-token tok2
 
+    # Inside a Cloudera AI job: pod-local DB + result file on the volume.
+    python -m ps06.ocr.cli --db /tmp/ps06_job.db run --auto-register \\
+        --case C1 --doc a --file /home/cdsw/in/a.pdf \\
+        --endpoint-url <url> --model-name <model> \\
+        --result-out /home/cdsw/ps06_spool/C1/a.json
+
     python -m ps06.ocr.cli --db ps06.db show --case C1 --doc a --json
 """
 
@@ -32,6 +38,7 @@ from ps06.ocr.auth import AuthProvider, CDSWAuthProvider, FakeAuthProvider
 from ps06.ocr.envelope import OcrResult, get_extraction
 from ps06.ocr.extraction import DEFAULT_PDF_DPI, ExtractionError, OcrJobConfig
 from ps06.ocr.job import run as run_job
+from ps06.ocr.result_file import write_failure, write_success
 from ps06.status import db
 from ps06.status.store import DocumentAlreadyExists, StatusStore, StatusStoreError
 
@@ -94,22 +101,46 @@ def _cmd_run(
     args: argparse.Namespace,
     client_factory: Callable[..., Any],
 ) -> int:
-    if args.auto_register:
-        try:
-            store.register_document(args.case, args.doc)
-        except DocumentAlreadyExists:
-            pass
+    try:
+        if args.auto_register:
+            try:
+                store.register_document(args.case, args.doc)
+            except DocumentAlreadyExists:
+                pass
 
-    auth = _build_auth(args)
-    config = _build_config(args)
-    result = run_job(
-        args.case, args.doc, args.file, config, store, auth, client_factory=client_factory
-    )
+        auth = _build_auth(args)
+        config = _build_config(args)
+        result = run_job(
+            args.case, args.doc, args.file, config, store, auth,
+            client_factory=client_factory,
+        )
+        if args.result_out:
+            write_success(args.result_out, result)
+    except Exception as exc:
+        if args.result_out:
+            _write_failure_file(args, f"{type(exc).__name__}: {exc}")
+        raise
 
     _print_result(result)
     if args.json:
         print(result.model_dump_json(indent=2))
     return 0
+
+
+def _write_failure_file(args: argparse.Namespace, error_detail: str) -> None:
+    """Best effort: the original error is re-raised by the caller either way.
+
+    If this write fails too, say so on stderr. The job still fails, and the
+    launcher treats a failed run with no result file as FAILED.
+    """
+    try:
+        write_failure(args.result_out, args.case, args.doc, error_detail)
+    except (OSError, ValueError) as write_exc:
+        print(
+            f"error: could not write result file {args.result_out}: "
+            f"{type(write_exc).__name__}: {write_exc}",
+            file=sys.stderr,
+        )
 
 
 def _cmd_show(
@@ -180,6 +211,11 @@ def _build_parser() -> argparse.ArgumentParser:
     p_run.add_argument(
         "--auto-register", action="store_true",
         help="register the document at RECEIVED first if not already present",
+    )
+    p_run.add_argument(
+        "--result-out", default=None,
+        help="also write a result file here (success or failure), for the API to "
+        "ingest; see ps06.ocr.result_file. Jobs use this with a pod-local --db.",
     )
     p_run.add_argument("--json", action="store_true", help="also print the full OcrResult as JSON")
     p_run.set_defaults(func=_cmd_run)
