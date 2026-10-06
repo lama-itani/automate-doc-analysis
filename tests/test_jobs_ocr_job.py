@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import ast
 import importlib.util
+import json
 import shlex
 import sys
 from pathlib import Path
@@ -16,6 +17,7 @@ from pathlib import Path
 import pytest
 
 from ps06.ocr import cli
+from ps06.ocr.auth import CDSWAuthProvider
 from ps06.status import db
 from ps06.status.states import DocumentStage
 from ps06.status.store import StatusStore
@@ -128,6 +130,52 @@ class TestRunJob:
         assert "C1" in text
 
 
+class TestRealAuthOnly:
+    FAKE_ARGS = [
+        ["run", "--auth", "fake", "--fake-token", "SECRET1"],
+        ["run", "--auth=fake", "--fake-token=SECRET1"],
+        ["run", "--fake-token", "SECRET1"],
+        ["run", "--fake-token=SECRET1"],
+        ["run", "--fake", "SECRET1"],
+        ["run", "--fake=SECRET1"],
+        ["run", "--fa", "SECRET1"],
+        ["run", "--auth", "fake"],
+        ["--db", "a.db", "run", "--auth=fake"],
+    ]
+
+    @pytest.mark.parametrize("args", FAKE_ARGS)
+    def test_fake_auth_is_refused_before_main_runs(self, job, monkeypatch, args):
+        calls = []
+        monkeypatch.setattr(cli, "main", lambda argv: calls.append(argv) or 0)
+        with pytest.raises(RuntimeError, match="refuses --auth fake") as err:
+            job.run_job(args)
+        assert calls == []
+        assert "SECRET1" not in str(err.value)
+
+    @pytest.mark.parametrize(
+        "args",
+        [
+            ["run", "--auth", "cdsw", "--case", "C1"],
+            ["run", "--auth=cdsw"],
+            ["run", "--case", "C1", "--file", "x.pdf"],
+            ["run", "--case", "fake", "--doc", "fake-token"],
+            ["show", "--case", "C1"],
+        ],
+    )
+    def test_real_auth_and_lookalike_values_pass(self, job, monkeypatch, args):
+        calls = []
+        monkeypatch.setattr(cli, "main", lambda argv: calls.append(argv) or 0)
+        job.run_job(args)
+        assert calls == [args]
+
+    def test_guard_fires_when_the_file_is_loaded(self, monkeypatch):
+        monkeypatch.setenv("JOB_ARGUMENTS", "run --auth fake --fake-token SECRET1")
+        monkeypatch.setattr(cli, "main", lambda argv: 0)
+        with pytest.raises(RuntimeError, match="refuses --auth fake"):
+            spec = importlib.util.spec_from_file_location("ocr_job_guard", JOB_FILE)
+            spec.loader.exec_module(importlib.util.module_from_spec(spec))
+
+
 # --- Kernel simulation -------------------------------------------------------
 
 
@@ -166,12 +214,21 @@ def _use_fake_client(monkeypatch, client_factory):
     )
 
 
+@pytest.fixture
+def jwt_file(monkeypatch, tmp_path):
+    """Point the CLI's default auth at a temp token file (real provider code)."""
+    path = tmp_path / "jwt"
+    path.write_text(json.dumps({"access_token": "test-token"}), encoding="utf-8")
+    monkeypatch.setattr(cli, "CDSWAuthProvider", lambda: CDSWAuthProvider(str(path)))
+    return path
+
+
 def _run_args(db_path, file_path):
+    # No auth flags: the CLI default is --auth cdsw, as in a real job.
     return [
         "--db", str(db_path), "run",
         "--case", "case-1", "--doc", "doc-1", "--file", str(file_path),
         "--endpoint-url", "http://fake", "--model-name", "test-model",
-        "--auth", "fake", "--fake-token", "tok1", "--fake-token", "tok2",
     ]
 
 
@@ -197,7 +254,8 @@ class TestKernelSimulation:
         assert [_failure(r) is None for r in results] == [True, True, False]
 
     def test_successful_job_every_chunk_succeeds(
-        self, kernel, monkeypatch, tmp_path, pdf_with_text_layer, fake_openai_client_factory
+        self, kernel, jwt_file, monkeypatch, tmp_path, pdf_with_text_layer,
+        fake_openai_client_factory,
     ):
         db_path = tmp_path / "ps06.db"
         _register(db_path)
@@ -213,7 +271,7 @@ class TestKernelSimulation:
         assert _status(db_path).stage == DocumentStage.OCR_DONE
 
     def test_ocr_failure_fails_the_job_and_marks_document_failed(
-        self, kernel, monkeypatch, tmp_path, fake_openai_client_factory
+        self, kernel, jwt_file, monkeypatch, tmp_path, fake_openai_client_factory
     ):
         db_path = tmp_path / "ps06.db"
         _register(db_path)
@@ -247,3 +305,39 @@ class TestKernelSimulation:
         results = kernel(JOB_FILE.read_text())
 
         assert isinstance(_failure(results[-1]), RuntimeError)
+
+    def test_missing_token_file_fails_job_and_marks_document_failed(
+        self, kernel, jwt_file, monkeypatch, tmp_path, pdf_with_text_layer,
+        fake_openai_client_factory,
+    ):
+        db_path = tmp_path / "ps06.db"
+        _register(db_path)
+        _use_fake_client(monkeypatch, fake_openai_client_factory)
+        jwt_file.unlink()
+        monkeypatch.setenv(
+            "JOB_ARGUMENTS", shlex.join(_run_args(db_path, pdf_with_text_layer))
+        )
+
+        results = kernel(JOB_FILE.read_text())
+
+        assert isinstance(_failure(results[-1]), Exception)
+        status = _status(db_path)
+        assert status.stage == DocumentStage.FAILED
+        assert "not found" in status.error_detail
+
+    def test_fake_token_in_job_arguments_fails_job_without_running_ocr(
+        self, kernel, monkeypatch, tmp_path, pdf_with_text_layer
+    ):
+        db_path = tmp_path / "ps06.db"
+        _register(db_path)
+        args = _run_args(db_path, pdf_with_text_layer) + [
+            "--auth", "fake", "--fake-token", "SECRET1",
+        ]
+        monkeypatch.setenv("JOB_ARGUMENTS", shlex.join(args))
+
+        results = kernel(JOB_FILE.read_text())
+
+        *earlier, last = results
+        assert all(_failure(r) is None for r in earlier)
+        assert isinstance(_failure(last), RuntimeError)
+        assert _status(db_path).stage == DocumentStage.RECEIVED
