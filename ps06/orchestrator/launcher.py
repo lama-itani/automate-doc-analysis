@@ -16,10 +16,12 @@ Two implementations:
   freshly minted token per document) and is fully testable via
   :class:`ps06.ocr.auth.FakeAuthProvider` plus the ``client_factory`` seam — no
   network, no live credentials. This is the runnable dev/pilot path today.
-* :class:`WorkbenchJobLauncher` — the production path: launch a per-document CML
-  Job via Workbench API v2. Ships as an honest ``NotImplementedError`` stub,
-  exactly like :class:`ps06.ocr.auth.CDSWAuthProvider` — blocked on Build
-  Handoff open item #4 (live Cloudera/Workbench credentials).
+* :class:`WorkbenchJobLauncher` — the production path: one CML Job (and one
+  job run) per document via Workbench API v2. ``/home/cdsw`` is NFS, where
+  SQLite WAL is unsafe across pods, so the job never writes the shared status
+  DB. It reports through a result file (:mod:`ps06.ocr.result_file`); the
+  handle's :meth:`done` reads that file and records ``OCR_DONE``/``FAILED`` in
+  the shared DB, from the orchestrator's thread.
 
 The orchestrator treats the **status table** as the source of truth for a
 document's outcome; a :class:`JobHandle` only reports whether the invocation
@@ -30,8 +32,12 @@ one" (a crash) and never leave a document silently stuck.
 
 from __future__ import annotations
 
+import logging
 import os
-from collections.abc import Callable
+import re
+import shlex
+import time
+from collections.abc import Callable, Sequence
 from concurrent.futures import CancelledError, Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -42,8 +48,12 @@ import openai
 from ps06.ocr import job
 from ps06.ocr.auth import AuthProvider
 from ps06.ocr.extraction import OcrJobConfig
+from ps06.ocr.result_file import ResultFileError, ingest, read_result_file, result_path
 from ps06.status import db
-from ps06.status.store import StatusStore
+from ps06.status.states import DocumentStage
+from ps06.status.store import StatusStore, StatusStoreError
+
+logger = logging.getLogger(__name__)
 
 
 @runtime_checkable
@@ -186,41 +196,311 @@ class LocalThreadJobLauncher:
         return False
 
 
-class WorkbenchJobLauncher:
-    """Production launcher: one per-document CML Job via Workbench API v2.
+#: Runtime validated on the workbench (PBJ JupyterLab, Python 3.10).
+DEFAULT_RUNTIME = (
+    "docker.repository.cloudera.com/cloudera/cdsw/"
+    "ml-runtime-pbj-jupyterlab-python3.10-standard:2026.08.1-b5"
+)
+#: Run-status suffixes that end a job run (``ENGINE_SUCCEEDED`` etc.).
+_TERMINAL_SUFFIXES = ("SUCCEEDED", "FAILED", "STOPPED", "TIMEDOUT")
+#: Pod-local status DB inside a job. Never the shared project-volume DB.
+_JOB_LOCAL_DB = "/tmp/ps06_job.db"
 
-    Not yet implemented. Launching a per-document job against the live Workbench
-    requires the Workbench API v2 key tracked as Build Handoff open item #4,
-    which is not available yet. :meth:`launch` raises rather than faking a launch
-    so a caller that forgets to inject :class:`LocalThreadJobLauncher` in a
-    dev/test context fails loudly instead of silently "succeeding" against no
-    real Workbench — the same honest-stub stance as
-    :class:`ps06.ocr.auth.CDSWAuthProvider`.
+
+def _slug(value: str, limit: int = 20) -> str:
+    return re.sub(r"[^A-Za-z0-9-]+", "-", value).strip("-")[:limit] or "x"
+
+
+class _ImmediateFailureHandle:
+    """Handle for a launch that failed before a run existed. Always done."""
+
+    def __init__(self, case_id: str, document_id: str, exc: BaseException) -> None:
+        self.case_id = case_id
+        self.document_id = document_id
+        self._exc = exc
+
+    def done(self) -> bool:
+        return True
+
+    def exception(self) -> BaseException | None:
+        return self._exc
+
+
+class _WorkbenchJobHandle:
+    """Tracks one job run and records its outcome in the shared status DB.
+
+    :meth:`done` polls the run, then reads the result file and ingests it. Call
+    it only from the thread that owns the launcher's ``store`` (the
+    orchestrator's thread). It never raises: any problem is kept as
+    :meth:`exception` and the handle reports done, so the orchestrator marks a
+    document that is still ``RECEIVED`` as ``FAILED`` with that detail.
+    """
+
+    def __init__(
+        self,
+        launcher: WorkbenchJobLauncher,
+        case_id: str,
+        document_id: str,
+        job_id: str,
+        run_id: str,
+        path: Path,
+    ) -> None:
+        self.case_id = case_id
+        self.document_id = document_id
+        self._launcher = launcher
+        self._job_id = job_id
+        self._run_id = run_id
+        self._path = path
+        self._started_at = launcher._time()
+        self._last_poll: float | None = None
+        self._terminal_at: float | None = None
+        self._run_status = ""
+        self._poll_errors = 0
+        self._finished = False
+        self._exc: BaseException | None = None
+
+    def exception(self) -> BaseException | None:
+        return self._exc if self._finished else None
+
+    def done(self) -> bool:
+        if self._finished:
+            return True
+        lc = self._launcher
+        now = lc._time()
+        if self._terminal_at is None:
+            if self._last_poll is not None and (
+                now - self._last_poll < lc._min_poll_interval
+            ):
+                return False
+            self._last_poll = now
+            status = self._poll()
+            if self._finished:
+                return True
+            if status is None:
+                return False
+            if status.upper().endswith(_TERMINAL_SUFFIXES):
+                self._terminal_at = now
+                self._run_status = status
+            elif now - self._started_at > lc._run_timeout:
+                return self._timeout()
+            else:
+                return False
+        return self._try_ingest(now)
+
+    def _where(self) -> str:
+        return f"job {self._job_id} run {self._run_id}"
+
+    def _poll(self) -> str | None:
+        lc = self._launcher
+        try:
+            run = lc._client.get_job_run(lc._project_id, self._job_id, self._run_id)
+        except Exception as exc:  # API/network error; counted, never swallowed
+            self._poll_errors += 1
+            logger.warning(
+                "poll failed (%d/%d): case=%s document=%s %s: %s: %s",
+                self._poll_errors, lc._max_poll_errors, self.case_id,
+                self.document_id, self._where(), type(exc).__name__, exc,
+            )
+            if self._poll_errors >= lc._max_poll_errors:
+                self._fail(
+                    f"could not poll {self._where()} after "
+                    f"{self._poll_errors} attempts: {type(exc).__name__}: {exc}"
+                )
+            return None
+        self._poll_errors = 0
+        return str(getattr(run, "status", "") or "")
+
+    def _timeout(self) -> bool:
+        lc = self._launcher
+        try:
+            lc._client.stop_job_run(lc._project_id, self._job_id, self._run_id)
+        except Exception as exc:  # best effort; the timeout failure is recorded below
+            logger.warning(
+                "could not stop %s: %s: %s", self._where(), type(exc).__name__, exc
+            )
+        return self._fail(
+            f"{self._where()} still {self._run_status or 'running'} after "
+            f"{lc._run_timeout:.0f}s; stop requested"
+        )
+
+    def _try_ingest(self, now: float) -> bool:
+        lc = self._launcher
+        try:
+            rf = read_result_file(self._path)
+        except ResultFileError as exc:
+            return self._fail(f"{self._where()} ({self._run_status}): {exc}")
+        if rf is None:
+            if now - (self._terminal_at or now) < lc._result_grace:
+                return False  # NFS may show the file late; keep waiting
+            return self._fail(
+                f"{self._where()} ended {self._run_status} without a result "
+                f"file at {self._path}"
+            )
+        try:
+            stage = ingest(lc._store, self.case_id, self.document_id, rf)
+        except (ResultFileError, StatusStoreError) as exc:
+            return self._fail(
+                f"could not record result of {self._where()}: "
+                f"{type(exc).__name__}: {exc}"
+            )
+        if not self._run_status.upper().endswith("SUCCEEDED"):
+            logger.warning(
+                "%s ended %s but wrote a result file; recorded %s",
+                self._where(), self._run_status, stage.value,
+            )
+        if stage is DocumentStage.OCR_DONE:
+            self._cleanup()
+        self._finished = True
+        return True
+
+    def _fail(self, detail: str) -> bool:
+        logger.warning(
+            "case=%s document=%s: %s", self.case_id, self.document_id, detail
+        )
+        self._exc = RuntimeError(detail)
+        self._finished = True
+        return True
+
+    def _cleanup(self) -> None:
+        """After a recorded success: drop the result file (applicant data) and
+        the job. Failures keep both, for debugging."""
+        lc = self._launcher
+        try:
+            self._path.unlink(missing_ok=True)
+        except OSError as exc:
+            logger.warning("could not delete %s: %s", self._path, exc)
+        try:
+            lc._client.delete_job(lc._project_id, self._job_id)
+        except Exception as exc:  # best effort; the document is already recorded
+            logger.warning(
+                "could not delete job %s: %s: %s", self._job_id,
+                type(exc).__name__, exc,
+            )
+
+
+class WorkbenchJobLauncher:
+    """Production launcher: one CML Job + one run per document (API v2).
+
+    ``store`` is the **shared** status DB and must be used only from the thread
+    that calls :meth:`launch` and the handles' ``done()`` (the orchestrator's).
+    Jobs get a pod-local DB and write ``<spool_dir>/<case>/<doc>.json``; the
+    handle ingests it. A run that ends with no valid result file leaves the
+    document ``RECEIVED``, and the orchestrator then records ``FAILED``.
+
+    Never puts tokens in job arguments: jobs use ``--auth cdsw`` (default).
+    ``launch`` does not raise: an API error returns a finished handle carrying
+    the error. ``client``/``cmlapi_module`` are test seams; by default they are
+    the real ``cmlapi`` and ``cmlapi.default_client()``.
     """
 
     def __init__(
         self,
         *,
-        host: str | None = None,
+        store: StatusStore,
+        spool_dir: str | Path,
+        endpoint_url: str,
+        model_name: str,
         project_id: str | None = None,
-        job_id: str | None = None,
-        api_key_env_var: str = "CDSW_APIV2_KEY",
+        client: Any = None,
+        cmlapi_module: Any = None,
+        script: str = "jobs/ocr_job.py",
+        runtime_identifier: str = DEFAULT_RUNTIME,
+        cpu: int = 1,
+        memory: int = 4,
+        extra_args: Sequence[str] = (),
+        run_timeout_seconds: float = 1800.0,
+        result_grace_seconds: float = 30.0,
+        min_poll_interval_seconds: float = 10.0,
+        max_poll_errors: int = 5,
+        time_fn: Callable[[], float] = time.monotonic,
     ) -> None:
-        self._host = host
+        if cmlapi_module is None:
+            try:
+                import cmlapi as cmlapi_module  # only on the Cloudera AI workbench
+            except ImportError as exc:
+                raise RuntimeError(
+                    "WorkbenchJobLauncher needs the 'cmlapi' package, which is "
+                    "available on the Cloudera AI workbench"
+                ) from exc
+        if project_id is None:
+            project_id = os.environ.get("CDSW_PROJECT_ID")
+        if not project_id:
+            raise ValueError("project_id is not set and CDSW_PROJECT_ID is unset")
+        self._api = cmlapi_module
+        self._client = client if client is not None else cmlapi_module.default_client()
         self._project_id = project_id
-        self._job_id = job_id
-        self._api_key_env_var = api_key_env_var
+        self._store = store
+        self._spool_dir = Path(spool_dir)
+        self._endpoint_url = endpoint_url
+        self._model_name = model_name
+        self._script = script
+        self._runtime = runtime_identifier
+        self._cpu = cpu
+        self._memory = memory
+        self._extra_args = tuple(extra_args)
+        self._run_timeout = run_timeout_seconds
+        self._result_grace = result_grace_seconds
+        self._min_poll_interval = min_poll_interval_seconds
+        self._max_poll_errors = max_poll_errors
+        self._time = time_fn
 
     def launch(self, case_id: str, document_id: str, file_path: str) -> JobHandle:
-        if not os.environ.get(self._api_key_env_var):
-            raise NotImplementedError(
-                f"WorkbenchJobLauncher requires a live Workbench API v2 key "
-                f"(env var {self._api_key_env_var!r} is unset) and a real "
-                f"per-document CML Job launch — blocked on Build Handoff open "
-                f"item #4. Use LocalThreadJobLauncher for dev/test."
+        job_id: str | None = None
+        try:
+            path = result_path(self._spool_dir, case_id, document_id)
+            path.unlink(missing_ok=True)  # never ingest a previous attempt's file
+            args = shlex.join(
+                [
+                    "--db", _JOB_LOCAL_DB, "run", "--auto-register",
+                    "--case", case_id, "--doc", document_id, "--file", file_path,
+                    "--endpoint-url", self._endpoint_url,
+                    "--model-name", self._model_name,
+                    "--result-out", str(path),
+                    *self._extra_args,
+                ]
             )
-        raise NotImplementedError(
-            "Launching a per-document CML Job via Workbench API v2 is not yet "
-            "implemented — blocked on Build Handoff open item #4 (live "
-            "Cloudera/Workbench credentials)."
+            name = f"ps06-{_slug(case_id)}-{_slug(document_id)}-{int(time.time())}"
+            job = self._client.create_job(
+                self._api.CreateJobRequest(
+                    project_id=self._project_id,
+                    name=name,
+                    script=self._script,
+                    arguments=args,
+                    cpu=self._cpu,
+                    memory=self._memory,
+                    runtime_identifier=self._runtime,
+                ),
+                self._project_id,
+            )
+            job_id = job.id
+            run = self._client.create_job_run(
+                self._api.CreateJobRunRequest(
+                    project_id=self._project_id, job_id=job_id
+                ),
+                self._project_id,
+                job_id,
+            )
+        except Exception as exc:  # launch must not crash the orchestrator loop
+            logger.error(
+                "launch failed: case=%s document=%s: %s: %s",
+                case_id, document_id, type(exc).__name__, exc,
+            )
+            if job_id is not None:
+                self._delete_job_quietly(job_id)
+            return _ImmediateFailureHandle(
+                case_id, document_id,
+                RuntimeError(f"launch failed: {type(exc).__name__}: {exc}"),
+            )
+        logger.info(
+            "launched: case=%s document=%s job=%s run=%s",
+            case_id, document_id, job_id, run.id,
         )
+        return _WorkbenchJobHandle(self, case_id, document_id, job_id, run.id, path)
+
+    def _delete_job_quietly(self, job_id: str) -> None:
+        try:
+            self._client.delete_job(self._project_id, job_id)
+        except Exception as exc:  # best effort cleanup after a failed launch
+            logger.warning(
+                "could not delete job %s: %s: %s", job_id, type(exc).__name__, exc
+            )

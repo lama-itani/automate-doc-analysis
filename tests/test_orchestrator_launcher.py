@@ -2,8 +2,8 @@
 
 `LocalThreadJobLauncher` is exercised end-to-end against a real `job.run` via
 the `pdf_with_text_layer` fixture (fast path -> no VLM/network call) and the
-real `FakeAuthProvider`. `WorkbenchJobLauncher` is asserted to be an honest
-stub. No live credentials or network.
+real `FakeAuthProvider`. `WorkbenchJobLauncher` has its own file
+(test_orchestrator_workbench_launcher.py). No live credentials or network.
 """
 
 from __future__ import annotations
@@ -14,10 +14,7 @@ import pytest
 
 from ps06.ocr.auth import FakeAuthProvider
 from ps06.ocr.extraction import OcrJobConfig
-from ps06.orchestrator.launcher import (
-    LocalThreadJobLauncher,
-    WorkbenchJobLauncher,
-)
+from ps06.orchestrator.launcher import LocalThreadJobLauncher
 from ps06.status import db
 from ps06.status.states import DocumentStage
 from ps06.status.store import StatusStore
@@ -98,17 +95,3 @@ class TestLocalThreadJobLauncher:
                 auth_factory=lambda: FakeAuthProvider(["t"]),
                 max_workers=0,
             )
-
-
-class TestWorkbenchJobLauncher:
-    def test_launch_raises_not_implemented_naming_open_item(self, monkeypatch):
-        monkeypatch.delenv("CDSW_APIV2_KEY", raising=False)
-        launcher = WorkbenchJobLauncher()
-        with pytest.raises(NotImplementedError, match="open item #4"):
-            launcher.launch("C1", "d1", "/tmp/whatever.pdf")
-
-    def test_launch_still_stub_even_with_key_present(self, monkeypatch):
-        monkeypatch.setenv("CDSW_APIV2_KEY", "present-but-unused")
-        launcher = WorkbenchJobLauncher()
-        with pytest.raises(NotImplementedError, match="Workbench API v2"):
-            launcher.launch("C1", "d1", "/tmp/whatever.pdf")
