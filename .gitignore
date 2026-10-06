@@ -28,3 +28,4 @@ htmlcov/
 
 #ui
 ui/node_modules/
+!ui/dist/
