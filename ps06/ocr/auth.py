@@ -9,7 +9,7 @@ without depending on a live Cloudera/Workbench topology in tests.
 
 from __future__ import annotations
 
-import os
+import json
 from typing import Protocol
 
 
@@ -21,31 +21,53 @@ class AuthProvider(Protocol):
         ...
 
 
-class CDSWAuthProvider:
-    """Real Cloudera AI Inference (Knox-gated) token provider.
+DEFAULT_JWT_PATH = "/tmp/jwt"
 
-    Not yet implemented: minting a fresh Knox JWT against the live topology
-    requires the Cloudera/Workbench credentials tracked as Build Handoff open
-    item #4, which are not available yet. Raises rather than returning a fake
-    token, so a caller that forgets to inject a test double in tests fails
-    loudly instead of silently "working" against no real auth.
+
+class AuthTokenError(RuntimeError):
+    """The job's token file is missing or unusable.
+
+    Messages name the file path and error type only. They never contain the
+    token or the file's contents.
     """
 
-    def __init__(self, api_key_env_var: str = "CDSW_APIV2_KEY") -> None:
-        self._api_key_env_var = api_key_env_var
+
+class CDSWAuthProvider:
+    """Real token provider: reads the access token Cloudera AI places in every
+    session and job at ``/tmp/jwt`` (confirmed in step-0 workbench tests,
+    2026-10-06).
+
+    Re-reads the file on every call, so
+    :class:`~ps06.ocr.http_client.ReauthHTTPClient`'s 401 re-mint picks up a
+    refreshed token if the platform rotated it. Raises
+    :class:`AuthTokenError` (never returns an empty or stale value) if the
+    file is missing, not JSON, or has no usable ``access_token``.
+    """
+
+    def __init__(self, jwt_path: str = DEFAULT_JWT_PATH) -> None:
+        self._jwt_path = jwt_path
 
     def mint_token(self) -> str:
-        if not os.environ.get(self._api_key_env_var):
-            raise NotImplementedError(
-                f"CDSWAuthProvider requires live Cloudera/Workbench credentials "
-                f"(env var {self._api_key_env_var!r} is unset) — blocked on "
-                f"Build Handoff open item #4. Use FakeAuthProvider in tests."
+        try:
+            with open(self._jwt_path, encoding="utf-8") as fh:
+                data = json.load(fh)
+        except FileNotFoundError as exc:
+            raise AuthTokenError(
+                f"token file {self._jwt_path} not found (it only exists inside "
+                f"Cloudera AI sessions and jobs)"
+            ) from exc
+        except (OSError, ValueError) as exc:
+            # from None: a chained JSON error could echo file contents.
+            raise AuthTokenError(
+                f"token file {self._jwt_path} is unreadable or not valid JSON "
+                f"({type(exc).__name__})"
+            ) from None
+        token = data.get("access_token") if isinstance(data, dict) else None
+        if not isinstance(token, str) or not token.strip():
+            raise AuthTokenError(
+                f"token file {self._jwt_path} has no usable 'access_token'"
             )
-        raise NotImplementedError(
-            "Live Knox JWT minting against the Cloudera AI Inference topology "
-            "is not yet implemented — blocked on Build Handoff open item #4 "
-            "(live Cloudera/Workbench credentials)."
-        )
+        return token.strip()
 
 
 class FakeAuthProvider:
