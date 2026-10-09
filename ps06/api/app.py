@@ -48,7 +48,7 @@ from pydantic import BaseModel
 
 from ps06.ocr.envelope import get_extraction
 from ps06.ocr.extraction import MAX_FILE_SIZE_MB, SUPPORTED_EXTENSIONS
-from ps06.orchestrator.launcher import JobLauncher, WorkbenchJobLauncher
+from ps06.orchestrator.launcher import DEFAULT_RUNTIME, JobLauncher, WorkbenchJobLauncher
 from ps06.orchestrator.orchestrator import OrchestratorConfig, process_case
 from ps06.rules.adapter import build_case_bundle
 from ps06.rules.engine import evaluate_case, get_snapshot
@@ -88,6 +88,10 @@ class ApiSettings:
     model_name: str = DEFAULT_MODEL
     max_concurrency: int = 3
     poll_interval_seconds: float = 2.0
+    job_runtime: str = DEFAULT_RUNTIME
+    job_cpu: int = 1
+    job_memory_gb: int = 4
+    job_timeout_seconds: int = 1800
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] = os.environ) -> ApiSettings:
@@ -97,22 +101,45 @@ class ApiSettings:
         if not endpoint:
             raise ValueError("PS06_ENDPOINT_URL is not set")
         data_dir = Path(env.get("PS06_DATA_DIR", "/home/cdsw/ps06_data"))
-        raw_concurrency = env.get("PS06_MAX_CONCURRENCY", "3")
-        try:
-            max_concurrency = int(raw_concurrency)
-        except ValueError as exc:
+        max_concurrency = _positive_int(env, "PS06_MAX_CONCURRENCY", 3)
+        job_cpu = _positive_int(env, "PS06_JOB_CPU", 1)
+        job_memory_gb = _positive_int(env, "PS06_JOB_MEMORY_GB", 4)
+        job_timeout_seconds = _positive_int(env, "PS06_JOB_TIMEOUT_SECONDS", 1800)
+        if not endpoint.startswith(("http://", "https://")) or not endpoint.rstrip(
+            "/"
+        ).endswith("/v1"):
             raise ValueError(
-                f"PS06_MAX_CONCURRENCY must be an integer, got {raw_concurrency!r}"
-            ) from exc
+                "PS06_ENDPOINT_URL must be an http(s) URL ending in /v1, "
+                f"got {endpoint!r}"
+            )
+        job_runtime = env.get("PS06_JOB_RUNTIME", "").strip() or DEFAULT_RUNTIME
         return cls(
             db_path=Path(env.get("PS06_DB_PATH", str(data_dir / "ps06.db"))),
             upload_dir=data_dir / "uploads",
             spool_dir=data_dir / "spool",
             ui_dist=Path(env.get("PS06_UI_DIST", str(_REPO_ROOT / "ui" / "dist"))),
             endpoint_url=endpoint,
-            model_name=env.get("PS06_MODEL_NAME", DEFAULT_MODEL),
+            model_name=env.get("PS06_MODEL_NAME", "").strip() or DEFAULT_MODEL,
             max_concurrency=max_concurrency,
+            job_runtime=job_runtime,
+            job_cpu=job_cpu,
+            job_memory_gb=job_memory_gb,
+            job_timeout_seconds=job_timeout_seconds,
         )
+
+
+def _positive_int(env: Mapping[str, str], name: str, default: int) -> int:
+    """Read ``name`` as an integer >= 1. Raise ``ValueError`` naming the variable."""
+    raw = env.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an integer, got {raw!r}") from exc
+    if value < 1:
+        raise ValueError(f"{name} must be at least 1, got {value}")
+    return value
 
 
 def workbench_launcher_factory(settings: ApiSettings) -> LauncherFactory:
@@ -124,6 +151,10 @@ def workbench_launcher_factory(settings: ApiSettings) -> LauncherFactory:
             spool_dir=settings.spool_dir,
             endpoint_url=settings.endpoint_url,
             model_name=settings.model_name,
+            runtime_identifier=settings.job_runtime,
+            cpu=settings.job_cpu,
+            memory=settings.job_memory_gb,
+            run_timeout_seconds=float(settings.job_timeout_seconds),
         )
 
     return factory
