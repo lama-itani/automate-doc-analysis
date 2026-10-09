@@ -54,11 +54,15 @@ cd ui && npm install && npm run build
 
 ### 2. Install the Python packages
 
-Open a session with the runtime below. Install the packages from `pyproject.toml` with the runtime's `python`:
+Open a session with the runtime below (PBJ JupyterLab, Python 3.10). Run from the repo root:
 
 ```
-python -m pip install --user pydantic PyMuPDF Pillow openai PyYAML fastapi uvicorn python-multipart
+python -m pip install --user -r requirements.txt
 ```
+
+The packages go to `/home/cdsw/.local`. The Application and the jobs share it, so install once per project.
+
+`requirements.txt` pins the versions tested live. Do not change them without a live test.
 
 ### 3. Create the Application
 
