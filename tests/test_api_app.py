@@ -441,6 +441,70 @@ def test_from_env_defaults_and_bad_concurrency():
         ApiSettings.from_env({"PS06_ENDPOINT_URL": "x", "PS06_MAX_CONCURRENCY": "two"})
 
 
+def test_from_env_job_defaults():
+    from ps06.orchestrator.launcher import DEFAULT_RUNTIME
+
+    s = ApiSettings.from_env({"PS06_ENDPOINT_URL": "https://e/v1"})
+    assert (s.job_runtime, s.job_cpu, s.job_memory_gb, s.job_timeout_seconds) == (
+        DEFAULT_RUNTIME, 1, 4, 1800,
+    )
+
+
+def test_from_env_job_overrides():
+    s = ApiSettings.from_env({
+        "PS06_ENDPOINT_URL": "https://e/v1/",
+        "PS06_MODEL_NAME": " my-model ",
+        "PS06_JOB_RUNTIME": "registry/custom:1",
+        "PS06_JOB_CPU": "2",
+        "PS06_JOB_MEMORY_GB": "8",
+        "PS06_JOB_TIMEOUT_SECONDS": "3600",
+    })
+    assert s.model_name == "my-model"
+    assert (s.job_runtime, s.job_cpu, s.job_memory_gb, s.job_timeout_seconds) == (
+        "registry/custom:1", 2, 8, 3600,
+    )
+
+
+@pytest.mark.parametrize("name", [
+    "PS06_JOB_CPU", "PS06_JOB_MEMORY_GB", "PS06_JOB_TIMEOUT_SECONDS", "PS06_MAX_CONCURRENCY",
+])
+@pytest.mark.parametrize("value", ["abc", "0", "-1"])
+def test_from_env_rejects_bad_job_numbers(name, value):
+    with pytest.raises(ValueError, match=name):
+        ApiSettings.from_env({"PS06_ENDPOINT_URL": "https://e/v1", name: value})
+
+
+@pytest.mark.parametrize("url", ["https://e", "https://e/v1/chat", "e/v1", "ftp://e/v1"])
+def test_from_env_rejects_bad_endpoint(url):
+    with pytest.raises(ValueError, match="ending in /v1"):
+        ApiSettings.from_env({"PS06_ENDPOINT_URL": url})
+
+
+def test_launcher_factory_passes_job_settings(tmp_path, monkeypatch):
+    import types
+
+    from ps06.api import app as app_module
+
+    captured = {}
+
+    class FakeLauncher:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr(app_module, "WorkbenchJobLauncher", FakeLauncher)
+    s = ApiSettings.from_env({
+        "PS06_ENDPOINT_URL": "https://e/v1",
+        "PS06_DATA_DIR": str(tmp_path),
+        "PS06_JOB_RUNTIME": "registry/custom:1",
+        "PS06_JOB_CPU": "2",
+        "PS06_JOB_MEMORY_GB": "8",
+        "PS06_JOB_TIMEOUT_SECONDS": "60",
+    })
+    app_module.workbench_launcher_factory(s)(types.SimpleNamespace())
+    assert captured["runtime_identifier"] == "registry/custom:1"
+    assert (captured["cpu"], captured["memory"], captured["run_timeout_seconds"]) == (2, 8, 60.0)
+
+
 def test_health_without_ui(client):
     assert client.get("/api/health").json()["ui_built"] is False
     assert client.get("/").status_code == 404

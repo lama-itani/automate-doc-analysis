@@ -150,8 +150,11 @@ def main(environ=None):
 
     app = create_app(settings)
     logger.info(
-        "ps06 API on %s:%s (data %s, model %s)",
-        HOST, port, settings.db_path.parent, settings.model_name,
+        "ps06 API on %s:%s | data %s | endpoint %s | model %s | concurrency %d | "
+        "job runtime %s | job cpu %d, memory %d GB, timeout %d s",
+        HOST, port, settings.db_path.parent, settings.endpoint_url,
+        settings.model_name, settings.max_concurrency, settings.job_runtime,
+        settings.job_cpu, settings.job_memory_gb, settings.job_timeout_seconds,
     )
     serve(app, port)
 
