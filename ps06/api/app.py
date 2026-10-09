@@ -92,6 +92,7 @@ class ApiSettings:
     job_cpu: int = 1
     job_memory_gb: int = 4
     job_timeout_seconds: int = 1800
+    job_result_grace_seconds: int = 120
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] = os.environ) -> ApiSettings:
@@ -105,6 +106,7 @@ class ApiSettings:
         job_cpu = _positive_int(env, "PS06_JOB_CPU", 1)
         job_memory_gb = _positive_int(env, "PS06_JOB_MEMORY_GB", 4)
         job_timeout_seconds = _positive_int(env, "PS06_JOB_TIMEOUT_SECONDS", 1800)
+        job_result_grace_seconds = _positive_int(env, "PS06_JOB_RESULT_GRACE_SECONDS", 120)
         if not endpoint.startswith(("http://", "https://")) or not endpoint.rstrip(
             "/"
         ).endswith("/v1"):
@@ -125,6 +127,7 @@ class ApiSettings:
             job_cpu=job_cpu,
             job_memory_gb=job_memory_gb,
             job_timeout_seconds=job_timeout_seconds,
+            job_result_grace_seconds=job_result_grace_seconds,
         )
 
 
@@ -155,6 +158,7 @@ def workbench_launcher_factory(settings: ApiSettings) -> LauncherFactory:
             cpu=settings.job_cpu,
             memory=settings.job_memory_gb,
             run_timeout_seconds=float(settings.job_timeout_seconds),
+            result_grace_seconds=float(settings.job_result_grace_seconds),
         )
 
     return factory

@@ -448,6 +448,7 @@ def test_from_env_job_defaults():
     assert (s.job_runtime, s.job_cpu, s.job_memory_gb, s.job_timeout_seconds) == (
         DEFAULT_RUNTIME, 1, 4, 1800,
     )
+    assert s.job_result_grace_seconds == 120
 
 
 def test_from_env_job_overrides():
@@ -458,8 +459,10 @@ def test_from_env_job_overrides():
         "PS06_JOB_CPU": "2",
         "PS06_JOB_MEMORY_GB": "8",
         "PS06_JOB_TIMEOUT_SECONDS": "3600",
+        "PS06_JOB_RESULT_GRACE_SECONDS": "300",
     })
     assert s.model_name == "my-model"
+    assert s.job_result_grace_seconds == 300
     assert (s.job_runtime, s.job_cpu, s.job_memory_gb, s.job_timeout_seconds) == (
         "registry/custom:1", 2, 8, 3600,
     )
@@ -467,6 +470,7 @@ def test_from_env_job_overrides():
 
 @pytest.mark.parametrize("name", [
     "PS06_JOB_CPU", "PS06_JOB_MEMORY_GB", "PS06_JOB_TIMEOUT_SECONDS", "PS06_MAX_CONCURRENCY",
+    "PS06_JOB_RESULT_GRACE_SECONDS",
 ])
 @pytest.mark.parametrize("value", ["abc", "0", "-1"])
 def test_from_env_rejects_bad_job_numbers(name, value):
@@ -499,10 +503,12 @@ def test_launcher_factory_passes_job_settings(tmp_path, monkeypatch):
         "PS06_JOB_CPU": "2",
         "PS06_JOB_MEMORY_GB": "8",
         "PS06_JOB_TIMEOUT_SECONDS": "60",
+        "PS06_JOB_RESULT_GRACE_SECONDS": "90",
     })
     app_module.workbench_launcher_factory(s)(types.SimpleNamespace())
     assert captured["runtime_identifier"] == "registry/custom:1"
     assert (captured["cpu"], captured["memory"], captured["run_timeout_seconds"]) == (2, 8, 60.0)
+    assert captured["result_grace_seconds"] == 90.0
 
 
 def test_health_without_ui(client):
