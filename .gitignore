@@ -25,6 +25,7 @@ htmlcov/
 #markdown and pdf files
 *.md
 *.pdf
+PS-06_*.md
 
 #ui
 ui/node_modules/
